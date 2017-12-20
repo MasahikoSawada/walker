@@ -172,8 +172,12 @@ WalwMain(Datum main_arg)
 	/* Connect to our database */
 	BackgroundWorkerInitializeConnection("postgres", NULL);
 
+#if PG_VERSION_NUM >= 110000
 	xlogreader_state = XLogReaderAllocate(wal_segment_size, &read_local_xlog_page,
 										  NULL);
+#else
+	xlogreader_state = XLogReaderAllocate(&read_local_xlog_page, NULL);
+#endif
 
 	if (!xlogreader_state)
 		elog(ERROR, "failed to allocate xlog reader");
