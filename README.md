@@ -42,6 +42,8 @@ typedef struct WalwCallbacks
 	WalwCallbackStartup_cb	startup_cb;
 	WalwCallbackHeap_cb	heap_cb;
 	WalwCallbackHeap2_cb	heap2_cb;
+	WalwCallbackXlog_cb		xlog_cb;
+	WalwCallbackXact_cb		xact_cb;
 } WalwCallbacks;
 
 typedef void (*WalwPluginInit) (struct WalwCallbacks *cb);
@@ -50,15 +52,17 @@ typedef void (*WalwPluginInit) (struct WalwCallbacks *cb);
 All callbacked are required.
 
 ## Walw Plugin Callbacks
+All callback funcitons are optional. If multiple plugins are specified, each callbacks is called in same order as setting.
+
 ### Callback for Startup
-The startup_cb is optional callback function while other callback functions are mandantory. This callback is called just after dynamically loaded at initialization step.
+This callback is called just after dynamically loaded at initialization step.
 
 ```c
 typedef void (*WalwCallbackStartup_cb) (void);
 ```
 
 ### Callback for Resoource Manager
-Walw identifies the WAL record and dispatches it to appropriate callbacks. If multiple plugins are specified, each callbacks is called in same order as setting.
+Walw identifies the WAL record and dispatches it to appropriate callbacks.
 
 ```c
 typedef void (*WalwCallbackHeap_cb) (XLogReaderState *record);
@@ -68,6 +72,18 @@ typedef void (*WalwCallbackHeap_cb) (XLogReaderState *record);
 
 ```c
 typedef void (*WalwCallbackHeap2_cb) (XLogReaderState *record);
+```
+
+### Callback for RM_XLOG_ID
+
+```c
+typedef void (*WalwCallbackXlog_cb) (XLogReaderState *record);
+```
+
+### Callback for RM_XACT_ID
+
+```c
+typedef void (*WalwCallbackXact_cb) (XLogReaderState *record);
 ```
 
 # FAQ

@@ -144,8 +144,9 @@ WalwInit(void)
 		if (callbacks->heap2_cb == NULL)
 			elog(ERROR, "output plugins have to register a heap callback");
 
-		/* invoke startup callback */
-		callbacks->startup_cb();
+		/* Invoke startup callback if it's provided */
+		if (callbacks->startup_cb)
+			callbacks->startup_cb();
 
 		/* Add to plugin list */
 		WalwState->plugins = lappend(WalwState->plugins, callbacks);
@@ -214,61 +215,61 @@ WalwMain(Datum main_arg)
 static void
 WalwProcessRecord(XLogReaderState *record)
 {
-	/* cast so we get a warning when new rmgrs are added */
-	switch ((RmgrIds) XLogRecGetRmid(record))
+	ListCell *cell;
+
+	foreach (cell, WalwState->plugins)
 	{
+		WalwCallbacks *cb = (WalwCallbacks *) lfirst(cell);
+		/* cast so we get a warning when new rmgrs are added */
+		switch ((RmgrIds) XLogRecGetRmid(record))
+		{
 			/*
 			 * Rmgrs we care about for logical decoding. Add new rmgrs in
 			 * rmgrlist.h's order.
 			 */
-		case RM_HEAP2_ID:
-		{
-			ListCell *cell;
-
-			foreach (cell, WalwState->plugins)
+			case RM_HEAP2_ID:
 			{
-				WalwCallbacks *cb = (WalwCallbacks *) lfirst(cell);
-
 				if (cb->heap2_cb)
 					cb->heap2_cb(record);
 			}
-		}
-		break;
-		case RM_HEAP_ID:
-		{
-			ListCell *cell;
-
-			foreach (cell, WalwState->plugins)
+			break;
+			case RM_HEAP_ID:
 			{
-				WalwCallbacks *cb = (WalwCallbacks *) lfirst(cell);
-
 				if (cb->heap_cb)
 					cb->heap_cb(record);
 			}
-		}
-		break;
-		case RM_XLOG_ID:
-		case RM_XACT_ID:
-		case RM_STANDBY_ID:
-		case RM_LOGICALMSG_ID:
-		case RM_SMGR_ID:
-		case RM_CLOG_ID:
-		case RM_DBASE_ID:
-		case RM_TBLSPC_ID:
-		case RM_MULTIXACT_ID:
-		case RM_RELMAP_ID:
-		case RM_BTREE_ID:
-		case RM_HASH_ID:
-		case RM_GIN_ID:
-		case RM_GIST_ID:
-		case RM_SEQ_ID:
-		case RM_SPGIST_ID:
-		case RM_BRIN_ID:
-		case RM_COMMIT_TS_ID:
-		case RM_REPLORIGIN_ID:
-		case RM_GENERIC_ID:
 			break;
-		case RM_NEXT_ID:
-			elog(ERROR, "unexpected RM_NEXT_ID rmgr_id: %u", (RmgrIds) XLogRecGetRmid(record));
+			case RM_XLOG_ID:
+			{
+				if (cb->xlog_cb)
+					cb->xlog_cb(record);
+			}
+			case RM_XACT_ID:
+			{
+				if (cb->xact_cb)
+					cb->xact_cb(record);
+			}
+			case RM_STANDBY_ID:
+			case RM_LOGICALMSG_ID:
+			case RM_SMGR_ID:
+			case RM_CLOG_ID:
+			case RM_DBASE_ID:
+			case RM_TBLSPC_ID:
+			case RM_MULTIXACT_ID:
+			case RM_RELMAP_ID:
+			case RM_BTREE_ID:
+			case RM_HASH_ID:
+			case RM_GIN_ID:
+			case RM_GIST_ID:
+			case RM_SEQ_ID:
+			case RM_SPGIST_ID:
+			case RM_BRIN_ID:
+			case RM_COMMIT_TS_ID:
+			case RM_REPLORIGIN_ID:
+			case RM_GENERIC_ID:
+				break;
+			case RM_NEXT_ID:
+				elog(ERROR, "unexpected RM_NEXT_ID rmgr_id: %u", (RmgrIds) XLogRecGetRmid(record));
+		}
 	}
 }

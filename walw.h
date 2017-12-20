@@ -21,10 +21,14 @@ typedef void (*WalwPluginInit) (struct WalwCallbacks *cb);
 typedef void (*WalwCallbackStartup_cb) (void);
 typedef void (*WalwCallbackHeap_cb) (XLogReaderState *record);
 typedef void (*WalwCallbackHeap2_cb) (XLogReaderState *record);
+typedef void (*WalwCallbackXlog_cb) (XLogReaderState *record);
+typedef void (*WalwCallbackXact_cb) (XLogReaderState *record);
 
 typedef struct WalwCallbacks
 {
 	WalwCallbackStartup_cb	startup_cb;
 	WalwCallbackHeap_cb		heap_cb;
 	WalwCallbackHeap2_cb	heap2_cb;
+	WalwCallbackXlog_cb		xlog_cb;
+	WalwCallbackXact_cb	xact_cb;
 } WalwCallbacks;
