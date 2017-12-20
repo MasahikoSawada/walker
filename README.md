@@ -39,6 +39,7 @@ An Walw plugin is loaded by dinamically loading a shared library with the plugin
 ```c
 typedef struct WalwCallbacks
 {
+	WalwCallbackStartup_cb	startup_cb;
 	WalwCallbackHeap_cb	heap_cb;
 	WalwCallbackHeap2_cb	heap2_cb;
 } WalwCallbacks;
@@ -49,9 +50,15 @@ typedef void (*WalwPluginInit) (struct WalwCallbacks *cb);
 All callbacked are required.
 
 ## Walw Plugin Callbacks
-The all callback functions are called whenever walw background worker read WAL record. Walw identifies the WAL record and dispatches it to appropriate callbacks. If multiple plugins are specified, each callbacks is called in same order as setting.
+### Callback for Startup
+The startup_cb is optional callback function while other callback functions are mandantory. This callback is called just after dynamically loaded at initialization step.
 
-### Callback for RM_HEAP_ID
+```c
+typedef void (*WalwCallbackStartup_cb) (void);
+```
+
+### Callback for Resoource Manager
+Walw identifies the WAL record and dispatches it to appropriate callbacks. If multiple plugins are specified, each callbacks is called in same order as setting.
 
 ```c
 typedef void (*WalwCallbackHeap_cb) (XLogReaderState *record);
