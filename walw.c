@@ -137,10 +137,14 @@ WalwInit(void)
 		/* Call plugin's init function for walw */
 		plugin_init(callbacks);
 
+		/* startup_cb can be NULL while other callback must not be NULL */
 		if (callbacks->heap_cb == NULL)
 			elog(ERROR, "output plugins have to register a heap callback");
 		if (callbacks->heap2_cb == NULL)
 			elog(ERROR, "output plugins have to register a heap callback");
+
+		/* invoke startup callback */
+		callbacks->startup_cb();
 
 		/* Add to plugin list */
 		WalwState->plugins = lappend(WalwState->plugins, callbacks);

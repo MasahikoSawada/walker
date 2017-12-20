@@ -37,6 +37,7 @@ PG_MODULE_MAGIC;
 extern void _PG_walw_plugin_init(WalwCallbacks *cb);
 
 /* Callback functions */
+static void heatmap_startup(void);
 static void heatmap_heap(XLogReaderState *record);
 static void heatmap_heap2(XLogReaderState *record);
 
@@ -44,8 +45,18 @@ static void heatmap_heap2(XLogReaderState *record);
 void
 _PG_walw_plugin_init(WalwCallbacks *cb)
 {
+	cb->startup_cb = heatmap_startup;
 	cb->heap_cb = heatmap_heap;
 	cb->heap2_cb = heatmap_heap2;
+}
+
+/*
+ * Startup callback function.
+ */
+static void
+heatmap_startup(void)
+{
+	/* Initialize something */
 }
 
 /*
