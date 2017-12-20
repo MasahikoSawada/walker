@@ -88,6 +88,13 @@ typedef void (*WalkerCallbackXlog_cb) (XLogReaderState *record);
 typedef void (*WalkerCallbackXact_cb) (XLogReaderState *record);
 ```
 
+### Callback for RM_SMGR_ID
+
+```c
+typedef void (*WalkerCallbackSmgr_cb) (XLogReaderState *record);
+```
+
+
 # FAQ
 * Is the WALker same as logical decoding plugin?
   * No. The Logical decoding plugins cannot retrieve WALs of wihch correponding transaction is rollbacked or aborted. Also, logical decoding plugin's function are invoked at commit of the transaction. On the other hand, WALker simply read through all WAL record including both aborted record and committed record.
