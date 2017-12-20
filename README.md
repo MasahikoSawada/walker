@@ -44,8 +44,8 @@ An WALker plugin is loaded by dynamically loading a shared library with the plug
 typedef struct WalkerCallbacks
 {
 	WalkerCallbackStartup_cb	startup_cb;
-	WalkerCallbackHeap_cb	heap_cb;
-	WalkerCallbackHeap2_cb	heap2_cb;
+	WalkerCallbackHeap_cb		heap_cb;
+	WalkerCallbackHeap2_cb		heap2_cb;
 	WalkerCallbackXlog_cb		xlog_cb;
 	WalkerCallbackXact_cb		xact_cb;
 } WalkerCallbacks;
