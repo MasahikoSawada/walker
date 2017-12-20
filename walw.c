@@ -119,6 +119,7 @@ WalwInit(void)
 
 	/* Initialize global variables */
 	WalwState = (WalwStateData *) palloc(sizeof(WalwStateData));
+	WalwState->plugins = NIL;
 
 	/* Iterate over all plugin names */
 	foreach (cell, plugin_list)
