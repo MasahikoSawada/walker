@@ -49,7 +49,7 @@ typedef struct Heatmap
 } Heatmap;
 
 /* Plugin handler function */
-extern void _PG_walker_plugin_init(WalkerCallbacks *cb);
+extern void _PG_walker_plugin_init(WALkerCallbacks *cb);
 
 /* Callback functions */
 static void heatmap_startup(void);
@@ -62,7 +62,7 @@ static HTAB *HeatmapHash;
 
 /* Handler function */
 void
-_PG_walker_plugin_init(WalkerCallbacks *cb)
+_PG_walker_plugin_init(WALkerCallbacks *cb)
 {
 	cb->startup_cb = heatmap_startup;
 	cb->heap_cb = heatmap_heap;

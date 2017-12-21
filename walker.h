@@ -13,23 +13,23 @@
 #include "access/transam.h"
 #include "access/heapam_xlog.h"
 
-struct WalkerCallbacks;
+struct WALkerCallbacks;
 
-typedef void (*WalkerPluginInit) (struct WalkerCallbacks *cb);
+typedef void (*WALkerPluginInit) (struct WALkerCallbacks *cb);
 
 /* Callback Functions */
-typedef void (*WalkerCallbackStartup_cb) (void);
-typedef void (*WalkerCallbackHeap_cb) (XLogReaderState *record);
-typedef void (*WalkerCallbackHeap2_cb) (XLogReaderState *record);
-typedef void (*WalkerCallbackXlog_cb) (XLogReaderState *record);
-typedef void (*WalkerCallbackXact_cb) (XLogReaderState *record);
+typedef void (*WALkerCallbackStartup_cb) (void);
+typedef void (*WALkerCallbackHeap_cb) (XLogReaderState *record);
+typedef void (*WALkerCallbackHeap2_cb) (XLogReaderState *record);
+typedef void (*WALkerCallbackXlog_cb) (XLogReaderState *record);
+typedef void (*WALkerCallbackXact_cb) (XLogReaderState *record);
 
 /* Struct containing callback functions */
-typedef struct WalkerCallbacks
+typedef struct WALkerCallbacks
 {
-	WalkerCallbackStartup_cb	startup_cb;
-	WalkerCallbackHeap_cb		heap_cb;
-	WalkerCallbackHeap2_cb		heap2_cb;
-	WalkerCallbackXlog_cb		xlog_cb;
-	WalkerCallbackXact_cb		xact_cb;
-} WalkerCallbacks;
+	WALkerCallbackStartup_cb	startup_cb;
+	WALkerCallbackHeap_cb		heap_cb;
+	WALkerCallbackHeap2_cb		heap2_cb;
+	WALkerCallbackXlog_cb		xlog_cb;
+	WALkerCallbackXact_cb		xact_cb;
+} WALkerCallbacks;

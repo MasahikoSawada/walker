@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * walker.c - WAL Walker
+ * walker.c - WAL WALker
  *
  * Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
@@ -37,17 +37,17 @@
 
 PG_MODULE_MAGIC;
 
-/* Walker state data */
-typedef struct WalkerStateData
+/* WALker state data */
+typedef struct WALkerStateData
 {
-	List	*plugins;	 /* List of WalkerCallbacks */
-} WalkerStateData;
+	List	*plugins;	 /* List of WALkerCallbacks */
+} WALkerStateData;
 
 void _PG_init(void);
-void WalkerMain(Datum main_arg);
+void WALkerMain(Datum main_arg);
 
-static void WalkerProcessRecord(XLogReaderState *record);
-static struct WalkerStateData *WalkerState;
+static void WALkerProcessRecord(XLogReaderState *record);
+static struct WALkerStateData *WALkerState;
 
 /* GUC parameters */
 static char *walker_plugins;
@@ -94,7 +94,7 @@ _PG_init(void)
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
 
 	strcpy(worker.bgw_library_name, "walker");
-	strcpy(worker.bgw_function_name, "WalkerMain");
+	strcpy(worker.bgw_function_name, "WALkerMain");
 	worker.bgw_notify_pid = 0;
 
 	snprintf(worker.bgw_name, BGW_MAXLEN, "walker");
@@ -103,10 +103,10 @@ _PG_init(void)
 }
 
 /*
- * Initialize Walker's space. Also we load all given plugins here.
+ * Initialize WALker's space. Also we load all given plugins here.
  */
 static void
-WalkerInit(void)
+WALkerInit(void)
 {
 	MemoryContext ctx;
 	List *plugin_list;
@@ -118,18 +118,18 @@ WalkerInit(void)
 	ctx = MemoryContextSwitchTo(TopMemoryContext);
 
 	/* Initialize global variables */
-	WalkerState = (WalkerStateData *) palloc(sizeof(WalkerStateData));
-	WalkerState->plugins = NIL;
+	WALkerState = (WALkerStateData *) palloc(sizeof(WALkerStateData));
+	WALkerState->plugins = NIL;
 
 	/* Iterate over all plugin names */
 	foreach (cell, plugin_list)
 	{
 		char *plugin_name = (char *) lfirst(cell);
-		WalkerPluginInit plugin_init;
-		WalkerCallbacks *callbacks;
+		WALkerPluginInit plugin_init;
+		WALkerCallbacks *callbacks;
 
-		callbacks = (WalkerCallbacks *) palloc(sizeof(WalkerCallbacks));
-		plugin_init = (WalkerPluginInit)
+		callbacks = (WALkerCallbacks *) palloc(sizeof(WALkerCallbacks));
+		plugin_init = (WALkerPluginInit)
 			load_external_function(plugin_name, "_PG_walker_plugin_init", false, NULL);
 
 		if (plugin_init == NULL)
@@ -149,7 +149,7 @@ WalkerInit(void)
 			callbacks->startup_cb();
 
 		/* Add to plugin list */
-		WalkerState->plugins = lappend(WalkerState->plugins, callbacks);
+		WALkerState->plugins = lappend(WALkerState->plugins, callbacks);
 	}
 
 	MemoryContextSwitchTo(ctx);
@@ -159,7 +159,7 @@ WalkerInit(void)
  * Entry point of walker background worker process.
  */
 void
-WalkerMain(Datum main_arg)
+WALkerMain(Datum main_arg)
 {
 	XLogReaderState *xlogreader_state;
 	XLogRecPtr	lsn = GetFlushRecPtr();
@@ -170,7 +170,7 @@ WalkerMain(Datum main_arg)
 	pqsignal(SIGTERM, die);
 
 	/* Initialize walker plugins */
-	WalkerInit();
+	WALkerInit();
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
@@ -208,18 +208,18 @@ WalkerMain(Datum main_arg)
 			elog(ERROR, "could not read WAL at %X/%X",
 				 (uint32) (lsn >> 32), (uint32) lsn);
 
-		WalkerProcessRecord(xlogreader_state);
+		WALkerProcessRecord(xlogreader_state);
 	}
 }
 
 static void
-WalkerProcessRecord(XLogReaderState *record)
+WALkerProcessRecord(XLogReaderState *record)
 {
 	ListCell *cell;
 
-	foreach (cell, WalkerState->plugins)
+	foreach (cell, WALkerState->plugins)
 	{
-		WalkerCallbacks *cb = (WalkerCallbacks *) lfirst(cell);
+		WALkerCallbacks *cb = (WALkerCallbacks *) lfirst(cell);
 		/* cast so we get a warning when new rmgrs are added */
 		switch ((RmgrIds) XLogRecGetRmid(record))
 		{
