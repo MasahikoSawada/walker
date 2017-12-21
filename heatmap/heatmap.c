@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * heatmap.c - Heatmap generator for HEAP
+ * heatmap.c - Heatmap generator for heap relations
  *
  * Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
