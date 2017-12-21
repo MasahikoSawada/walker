@@ -110,6 +110,11 @@ heatmap_heap(XLogReaderState *record)
 	RelFileNode node;
 	BlockNumber blkno;
 
+	/*
+	 * Since XLOG_HEAP_INIT_PAGE flag could be set with another
+	 * flag, we get rid of it.
+	 */
+	info &= ~XLOG_HEAP_INIT_PAGE;
 	switch (info)
 	{
 		/* Make one page dirty */
@@ -385,7 +390,7 @@ HeatmapLogSummary(void)
 		RelFileNode node = entry->node;
 
 		ereport(LOG,
-				(errmsg("(%d,%d,%d) %s",
+				(errmsg("(%d,%d,%d) heatmap (%s)",
 						node.spcNode, node.dbNode,node.relNode,
 						dumped_map)));
 	}
