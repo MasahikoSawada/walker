@@ -40,9 +40,16 @@ PG_MODULE_MAGIC;
 /* Heatmap array size */
 #define MAP_SIZE 1024
 
-/* Each MAP_RANGE_SIZE blocks belong to same index */
-#define MAP_RANGE_SIZE 32
+/*
+ * Each MAP_RANGE_SIZE blocks belong to same index.
+ * If a bit of visibility map is set, we at least read
+ * SKIP_PAGES_THRESHOLD blocks (currently 32 blocks).
+ * So it makes sence if we have ranges per more than
+ * 32 blocks.
+ */
+#define MAP_RANGE_SIZE (32 * 4)
 
+/* Convert target block number to index of heatmap */
 #define TargetBlknoToIndex(blkno) (blkno / MAP_RANGE_SIZE)
 
 typedef struct Heatmap
@@ -62,16 +69,22 @@ static void heatmap_xlog(XLogReaderState *record);
 static void heatmap_xact(XLogReaderState *record);
 static void heatmap_smgr(XLogReaderState *record);
 
-static void HeatmapRecordChange(RelFileNode node, BlockNumber blkno,
-								int temp);
-static void HeatmapClearChange(RelFileNode node, BlockNumber blkno);
-static void HeatmapClearAllChanges(RelFileNode node);
+/* Heatmap processing functions */
+static void HeatmapChangeTemprature(RelFileNode node, BlockNumber blkno,
+									int delta_temp);
+static void HeatmapCoolTemprature(RelFileNode node, BlockNumber blkno,
+								  int ratio);
+static void HeatmapClearTemprature(RelFileNode node);
+static Heatmap *GetHeatmapEntry(RelFileNode node);
+
+/* Debug purpose */
 static void HeatmapLogSummary(void);
 static char *HeatmapDump(int *heatmap);
 
+
 static HTAB *HeatmapHash;
 
-/* Handler function */
+/* Initialize functions */
 void
 _PG_walker_plugin_init(WALkerCallbacks *cb)
 {
@@ -123,7 +136,7 @@ heatmap_heap(XLogReaderState *record)
 		case XLOG_HEAP_HOT_UPDATE:
 		case XLOG_HEAP_LOCK:
 			XLogRecGetBlockTag(record, 0, &node, NULL, &blkno);
-			HeatmapRecordChange(node, blkno, 1);
+			HeatmapChangeTemprature(node, blkno, 1);
 			break;
 
 		/* Make two pages dirty */
@@ -133,8 +146,8 @@ heatmap_heap(XLogReaderState *record)
 
 				XLogRecGetBlockTag(record, 0, &node, NULL, &newblkno);
 				XLogRecGetBlockTag(record, 1, NULL, NULL, &oldblkno);
-				HeatmapRecordChange(node, newblkno, 1);
-				HeatmapRecordChange(node, oldblkno, 1);
+				HeatmapChangeTemprature(node, newblkno, 1);
+				HeatmapChangeTemprature(node, oldblkno, 1);
 				break;
 			}
 
@@ -150,7 +163,7 @@ heatmap_heap(XLogReaderState *record)
 }
 
 /*
- * Process RM_HEAP_ID record.
+ * Process RM_HEAP2_ID record.
  */
 static void
 heatmap_heap2(XLogReaderState *record)
@@ -169,19 +182,19 @@ heatmap_heap2(XLogReaderState *record)
 		/* Make one page clean */
 		case XLOG_HEAP2_CLEAN:
 			XLogRecGetBlockTag(record, 0, &node, NULL, &blkno);
-			HeatmapRecordChange(node, blkno, -1);
+			HeatmapChangeTemprature(node, blkno, -1);
 
 		/* Make one page clear */
 		case XLOG_HEAP2_VISIBLE:
 			XLogRecGetBlockTag(record, 1, &node, NULL, &blkno);
-			HeatmapClearChange(node, blkno);
+			HeatmapCoolTemprature(node, blkno, MAP_RANGE_SIZE);
 			break;
 
 		/* Make one page dirty */
 		case XLOG_HEAP2_MULTI_INSERT:
 		case XLOG_HEAP2_LOCK_UPDATED:
 			XLogRecGetBlockTag(record, 0, &node, NULL, &blkno);
-			HeatmapRecordChange(node, blkno, 1);
+			HeatmapChangeTemprature(node, blkno, 1);
 			break;
 
 		/* Ignore */
@@ -193,6 +206,9 @@ heatmap_heap2(XLogReaderState *record)
 	}
 }
 
+/*
+ * Process RM_XLOG_ID record.
+ */
 static void
 heatmap_xlog(XLogReaderState *record)
 {
@@ -224,6 +240,9 @@ heatmap_xlog(XLogReaderState *record)
 
 }
 
+/*
+ * Process RM_SMGR_ID record.
+ */
 static void
 heatmap_smgr(XLogReaderState *record)
 {
@@ -237,7 +256,7 @@ heatmap_smgr(XLogReaderState *record)
 		case XLOG_SMGR_TRUNCATE:
 			{
 				xl_smgr_truncate *xlrec = (xl_smgr_truncate *) XLogRecGetData(record);
-				HeatmapClearAllChanges(xlrec->rnode);
+				HeatmapClearTemprature(xlrec->rnode);
 				break;
 			}
 		default:
@@ -246,6 +265,9 @@ heatmap_smgr(XLogReaderState *record)
 	}
 }
 
+/*
+ * Process RM_XACT_ID record.
+ */
 static void
 heatmap_xact(XLogReaderState *record)
 {
@@ -264,7 +286,7 @@ heatmap_xact(XLogReaderState *record)
 				{
 					int i;
 					for (i = 0; i < parsed.nrels; i++)
-						HeatmapClearAllChanges(parsed.xnodes[i]);
+						HeatmapClearTemprature(parsed.xnodes[i]);
 				}
 				break;
 			}
@@ -284,51 +306,71 @@ heatmap_xact(XLogReaderState *record)
 }
 
 /*
- * Record heap block changes of each relations. Increment
- * the temprature of given relation per this function calls.
+ * Record heap block changes of each relations. Increment one degree
+ * of the temprature of given relation per thisfunction calls.
  */
 static void
-HeatmapRecordChange(RelFileNode node, BlockNumber blkno, int temp)
+HeatmapChangeTemprature(RelFileNode node, BlockNumber blkno, int delta_temp)
 {
 	int index;
 	Heatmap *hm;
-	bool	found;
 
 	/* Skip if the given relation is biltins */
 	if (node.relNode < FirstNormalObjectId)
 		return;
 
-	hm = (Heatmap *) hash_search(HeatmapHash,
-								 (void *) &node,
-								 HASH_ENTER, &found);
-
-	/* Initialize */
-	if (!found)
-	{
-		hm->node.spcNode = node.spcNode;
-		hm->node.dbNode = node.dbNode;
-		hm->node.relNode = node.relNode;
-		memset(hm->hmap, 0, MAP_SIZE);
-	}
-
+	hm = GetHeatmapEntry(node);
 	index = TargetBlknoToIndex(blkno);
 
 	/* XXX : Make sure we don't overflow */
 	Assert(index < MAP_SIZE);
 
 	/* Record the temprature of this range */
-	hm->hmap[index] += temp;
+	hm->hmap[index] += delta_temp;
 }
 
 /*
- * Claer heap block changes of each relations. If we decete
- * the WALs that implies the given block doesn't has any garbage
- * we can clear its temprature.
+ * Cool the temprature of one heap block changes of each relations. If
+ * we decete the WALs that implies the given block doesn't has any
+ * garbage we can cool the temprature of the block range by given
+ * ratio.
  */
 static void
-HeatmapClearChange(RelFileNode node, BlockNumber blkno)
+HeatmapCoolTemprature(RelFileNode node, BlockNumber blkno, int ratio)
 {
 	int index;
+	Heatmap *hm;
+
+	/* Skip if the given relation is biltins */
+	if (node.relNode < FirstNormalObjectId)
+		return;
+
+	hm = GetHeatmapEntry(node);
+	index = TargetBlknoToIndex(blkno);
+
+	/* XXX : Make sure we don't overflow */
+	Assert(index < MAP_SIZE);
+
+	/* Clear temprature of this range */
+	hm->hmap[index] /= ratio;
+}
+
+static void
+HeatmapClearTemprature(RelFileNode node)
+{
+	Heatmap *hm;
+
+	/* Skip if the given relation is biltins */
+	if (node.relNode < FirstNormalObjectId)
+		return;
+
+	hm = GetHeatmapEntry(node);
+	memset(hm->hmap, 0, MAP_SIZE);
+}
+
+static Heatmap*
+GetHeatmapEntry(RelFileNode node)
+{
 	Heatmap *hm;
 	bool	found;
 
@@ -345,35 +387,9 @@ HeatmapClearChange(RelFileNode node, BlockNumber blkno)
 		memset(hm->hmap, 0, MAP_SIZE);
 	}
 
-	index = TargetBlknoToIndex(blkno);
-
-	/* XXX : Make sure we don't overflow */
-	Assert(index < MAP_SIZE);
-
-	/* Clear temprature of this range */
-	hm->hmap[index] = 0;
+	return hm;
 }
 
-static void
-HeatmapClearAllChanges(RelFileNode node)
-{
-	Heatmap *hm;
-	bool	found;
-
-	hm = (Heatmap *) hash_search(HeatmapHash,
-								 (void *) &node,
-								 HASH_ENTER, &found);
-
-	/* Initialize */
-	if (!found)
-	{
-		hm->node.spcNode = node.spcNode;
-		hm->node.dbNode = node.dbNode;
-		hm->node.relNode = node.relNode;
-	}
-
-	memset(hm->hmap, 0, MAP_SIZE);
-}
 
 /* Logging heatmap summary for debug purpose */
 static void
@@ -396,6 +412,7 @@ HeatmapLogSummary(void)
 	}
 }
 
+/* Return cstring-represented heatmap */
 static char *
 HeatmapDump(int *heatmap)
 {
