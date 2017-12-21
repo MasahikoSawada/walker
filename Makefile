@@ -1,16 +1,16 @@
-# src/bin/walw/Makefile
+# src/bin/walker/Makefile
 
-MODULES = walw heatmap
-PGFILEDESC = "walw"
+MODULES = walker heatmap
+PGFILEDESC = "walker"
 
-OBJS = walw.o xlogreader.o heatmap.o
+OBJS = walker.o xlogreader.o heatmap.o
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 else
-subdir = src/bin/walw
+subdir = src/bin/walker
 top_builddir = ../../
 include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk

@@ -1,17 +1,17 @@
 /*-------------------------------------------------------------------------
  *
- * walw.c - WAL Walker
+ * walker.c - WAL Walker
  *
  * Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *		  walw/walw.c
+ *		  walker/walker.c
  *-------------------------------------------------------------------------
  */
 
 #include "postgres.h"
 
-#include "walw.h"
+#include "walker.h"
 
 /* These are always necessary for a bgworker */
 #include "access/xlog.h"
@@ -37,20 +37,20 @@
 
 PG_MODULE_MAGIC;
 
-/* Walw state data */
-typedef struct WalwStateData
+/* Walker state data */
+typedef struct WalkerStateData
 {
-	List	*plugins;	 /* List of WalwCallbacks */
-} WalwStateData;
+	List	*plugins;	 /* List of WalkerCallbacks */
+} WalkerStateData;
 
 void _PG_init(void);
-void WalwMain(Datum main_arg);
+void WalkerMain(Datum main_arg);
 
-static void WalwProcessRecord(XLogReaderState *record);
-static struct WalwStateData *WalwState;
+static void WalkerProcessRecord(XLogReaderState *record);
+static struct WalkerStateData *WalkerState;
 
 /* GUC parameters */
-static char *walw_plugins;
+static char *walker_plugins;
 
 /* flags set by signal handlers */
 sig_atomic_t got_sighup = false;
@@ -59,7 +59,7 @@ sig_atomic_t got_sighup = false;
  * Signal handler for SIGHUP.
  */
 static void
-walw_sighup(SIGNAL_ARGS)
+walker_sighup(SIGNAL_ARGS)
 {
 	got_sighup = true;
 	if (MyProc)
@@ -77,10 +77,10 @@ _PG_init(void)
 	if (!process_shared_preload_libraries_in_progress)
 		return;
 
-	DefineCustomStringVariable("walw.plugins",
+	DefineCustomStringVariable("walker.plugins",
 							   "comma-separated plugin names",
 							   NULL,
-							   &walw_plugins,
+							   &walker_plugins,
 							   NULL,
 							   PGC_POSTMASTER,
 							   0,
@@ -93,49 +93,49 @@ _PG_init(void)
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
 
-	strcpy(worker.bgw_library_name, "walw");
-	strcpy(worker.bgw_function_name, "WalwMain");
+	strcpy(worker.bgw_library_name, "walker");
+	strcpy(worker.bgw_function_name, "WalkerMain");
 	worker.bgw_notify_pid = 0;
 
-	snprintf(worker.bgw_name, BGW_MAXLEN, "walw");
+	snprintf(worker.bgw_name, BGW_MAXLEN, "walker");
 	worker.bgw_main_arg = Int32GetDatum(1);
 	RegisterBackgroundWorker(&worker);
 }
 
 /*
- * Initialize Walw's space. Also we load all given plugins here.
+ * Initialize Walker's space. Also we load all given plugins here.
  */
 static void
-WalwInit(void)
+WalkerInit(void)
 {
 	MemoryContext ctx;
 	List *plugin_list;
 	ListCell *cell;
 
-	if (!SplitIdentifierString(walw_plugins, ',', &plugin_list))
+	if (!SplitIdentifierString(walker_plugins, ',', &plugin_list))
 		elog(ERROR, "plugin syntax is invalid");
 
 	ctx = MemoryContextSwitchTo(TopMemoryContext);
 
 	/* Initialize global variables */
-	WalwState = (WalwStateData *) palloc(sizeof(WalwStateData));
-	WalwState->plugins = NIL;
+	WalkerState = (WalkerStateData *) palloc(sizeof(WalkerStateData));
+	WalkerState->plugins = NIL;
 
 	/* Iterate over all plugin names */
 	foreach (cell, plugin_list)
 	{
 		char *plugin_name = (char *) lfirst(cell);
-		WalwPluginInit plugin_init;
-		WalwCallbacks *callbacks;
+		WalkerPluginInit plugin_init;
+		WalkerCallbacks *callbacks;
 
-		callbacks = (WalwCallbacks *) palloc(sizeof(WalwCallbacks));
-		plugin_init = (WalwPluginInit)
-			load_external_function(plugin_name, "_PG_walw_plugin_init", false, NULL);
+		callbacks = (WalkerCallbacks *) palloc(sizeof(WalkerCallbacks));
+		plugin_init = (WalkerPluginInit)
+			load_external_function(plugin_name, "_PG_walker_plugin_init", false, NULL);
 
 		if (plugin_init == NULL)
-			elog(ERROR, "output plugins have to declare the _PG_walw_plugin_init symbol");
+			elog(ERROR, "output plugins have to declare the _PG_walker_plugin_init symbol");
 
-		/* Call plugin's init function for walw */
+		/* Call plugin's init function for walker */
 		plugin_init(callbacks);
 
 		/* startup_cb can be NULL while other callback must not be NULL */
@@ -149,28 +149,28 @@ WalwInit(void)
 			callbacks->startup_cb();
 
 		/* Add to plugin list */
-		WalwState->plugins = lappend(WalwState->plugins, callbacks);
+		WalkerState->plugins = lappend(WalkerState->plugins, callbacks);
 	}
 
 	MemoryContextSwitchTo(ctx);
 }
 
 /*
- * Entry point of walw background worker process.
+ * Entry point of walker background worker process.
  */
 void
-WalwMain(Datum main_arg)
+WalkerMain(Datum main_arg)
 {
 	XLogReaderState *xlogreader_state;
 	XLogRecPtr	lsn = GetFlushRecPtr();
 	XLogRecord *record;
 	char *errmsg;
 
-	pqsignal(SIGHUP, walw_sighup);
+	pqsignal(SIGHUP, walker_sighup);
 	pqsignal(SIGTERM, die);
 
-	/* Initialize walw plugins */
-	WalwInit();
+	/* Initialize walker plugins */
+	WalkerInit();
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
@@ -208,18 +208,18 @@ WalwMain(Datum main_arg)
 			elog(ERROR, "could not read WAL at %X/%X",
 				 (uint32) (lsn >> 32), (uint32) lsn);
 
-		WalwProcessRecord(xlogreader_state);
+		WalkerProcessRecord(xlogreader_state);
 	}
 }
 
 static void
-WalwProcessRecord(XLogReaderState *record)
+WalkerProcessRecord(XLogReaderState *record)
 {
 	ListCell *cell;
 
-	foreach (cell, WalwState->plugins)
+	foreach (cell, WalkerState->plugins)
 	{
-		WalwCallbacks *cb = (WalwCallbacks *) lfirst(cell);
+		WalkerCallbacks *cb = (WalkerCallbacks *) lfirst(cell);
 		/* cast so we get a warning when new rmgrs are added */
 		switch ((RmgrIds) XLogRecGetRmid(record))
 		{

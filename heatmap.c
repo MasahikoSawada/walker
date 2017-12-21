@@ -5,13 +5,13 @@
  * Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *		  walw/heatmap.c
+ *		  walker/heatmap.c
  *-------------------------------------------------------------------------
  */
 
 #include "postgres.h"
 
-#include "walw.h"
+#include "walker.h"
 
 /* These are always necessary for a bgworker */
 #include "access/xlog.h"
@@ -49,7 +49,7 @@ typedef struct Heatmap
 } Heatmap;
 
 /* Plugin handler function */
-extern void _PG_walw_plugin_init(WalwCallbacks *cb);
+extern void _PG_walker_plugin_init(WalkerCallbacks *cb);
 
 /* Callback functions */
 static void heatmap_startup(void);
@@ -62,7 +62,7 @@ static HTAB *HeatmapHash;
 
 /* Handler function */
 void
-_PG_walw_plugin_init(WalwCallbacks *cb)
+_PG_walker_plugin_init(WalkerCallbacks *cb)
 {
 	cb->startup_cb = heatmap_startup;
 	cb->heap_cb = heatmap_heap;
