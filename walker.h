@@ -23,6 +23,7 @@ typedef void (*WALkerCallbackHeap_cb) (XLogReaderState *record);
 typedef void (*WALkerCallbackHeap2_cb) (XLogReaderState *record);
 typedef void (*WALkerCallbackXlog_cb) (XLogReaderState *record);
 typedef void (*WALkerCallbackXact_cb) (XLogReaderState *record);
+typedef void (*WALkerCallbackSmgr_cb) (XLogReaderState *record);
 
 /* Struct containing callback functions */
 typedef struct WALkerCallbacks
@@ -32,4 +33,5 @@ typedef struct WALkerCallbacks
 	WALkerCallbackHeap2_cb		heap2_cb;
 	WALkerCallbackXlog_cb		xlog_cb;
 	WALkerCallbackXact_cb		xact_cb;
+	WALkerCallbackSmgr_cb		smgr_cb;
 } WALkerCallbacks;

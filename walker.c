@@ -244,14 +244,21 @@ WALkerProcessRecord(XLogReaderState *record)
 				if (cb->xlog_cb)
 					cb->xlog_cb(record);
 			}
+			break;
 			case RM_XACT_ID:
 			{
 				if (cb->xact_cb)
 					cb->xact_cb(record);
 			}
+			break;
+			case RM_SMGR_ID:
+			{
+				if (cb->smgr_cb)
+					cb->smgr_cb(record);
+			}
+			break;
 			case RM_STANDBY_ID:
 			case RM_LOGICALMSG_ID:
-			case RM_SMGR_ID:
 			case RM_CLOG_ID:
 			case RM_DBASE_ID:
 			case RM_TBLSPC_ID:
