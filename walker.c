@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * walker.c - WAL WALker
+ * walker.c - WAL WALker, a simple and pluggable background worker
  *
  * Copyright (c) 2013-2017, PostgreSQL Global Development Group
  *
@@ -47,10 +47,12 @@ void _PG_init(void);
 void WALkerMain(Datum main_arg);
 
 static void WALkerProcessRecord(XLogReaderState *record);
+
+/* Pointer to state data */
 static struct WALkerStateData *WALkerState;
 
-/* GUC parameters */
-static char *walker_plugins;
+/* GUC parameter */
+static char *walker_plugins;	/* comma-separated plugin list */
 
 /* flags set by signal handlers */
 sig_atomic_t got_sighup = false;
@@ -67,7 +69,7 @@ walker_sighup(SIGNAL_ARGS)
 }
 
 /*
- * Initialize function.
+ * Initialize.
  */
 void
 _PG_init(void)
@@ -104,6 +106,7 @@ _PG_init(void)
 
 /*
  * Initialize WALker's space. Also we load all given plugins here.
+ * If the loaded plugin support startup callback, we invoke it here.
  */
 static void
 WALkerInit(void)
@@ -138,11 +141,10 @@ WALkerInit(void)
 		/* Call plugin's init function for walker */
 		plugin_init(callbacks);
 
-		/* startup_cb can be NULL while other callback must not be NULL */
-		if (callbacks->heap_cb == NULL)
-			elog(ERROR, "output plugins have to register a heap callback");
-		if (callbacks->heap2_cb == NULL)
-			elog(ERROR, "output plugins have to register a heap callback");
+		/*
+		 * We don't check any existing check for callbacks because all callbacks
+		 * are optional.
+		 */
 
 		/* Invoke startup callback if it's provided */
 		if (callbacks->startup_cb)
@@ -193,14 +195,16 @@ WALkerMain(Datum main_arg)
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		/* Got SIGHUP, relad configuration file */
+		/* Got SIGHUP, read configuration file */
 		if (got_sighup)
 		{
 			got_sighup = false;
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
-		/* Read a record. Wait for new record if it is not generated yet */
+		/*
+		 * Read a record. Wait for new record if it is not generated yet.
+		 */
 		record = XLogReadRecord(xlogreader_state, lsn, &errmsg);
 		lsn = InvalidXLogRecPtr;
 
@@ -212,6 +216,10 @@ WALkerMain(Datum main_arg)
 	}
 }
 
+/*
+ * Process read WAL record and invoke corresponding callbacks.
+ * All callbacks are optional.
+ */
 static void
 WALkerProcessRecord(XLogReaderState *record)
 {
@@ -220,13 +228,10 @@ WALkerProcessRecord(XLogReaderState *record)
 	foreach (cell, WALkerState->plugins)
 	{
 		WALkerCallbacks *cb = (WALkerCallbacks *) lfirst(cell);
+
 		/* cast so we get a warning when new rmgrs are added */
 		switch ((RmgrIds) XLogRecGetRmid(record))
 		{
-			/*
-			 * Rmgrs we care about for logical decoding. Add new rmgrs in
-			 * rmgrlist.h's order.
-			 */
 			case RM_HEAP2_ID:
 			{
 				if (cb->heap2_cb)
@@ -257,6 +262,8 @@ WALkerProcessRecord(XLogReaderState *record)
 					cb->smgr_cb(record);
 			}
 			break;
+
+			/* Not support yet */
 			case RM_STANDBY_ID:
 			case RM_LOGICALMSG_ID:
 			case RM_CLOG_ID:

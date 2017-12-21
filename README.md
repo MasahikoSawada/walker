@@ -2,6 +2,8 @@
 
 A simple, pluggable background worker for PostgreSQL, walking over WAL.
 
+WALker is a background worker for PostgreSQL. It keeps walking over generated WAL and read it. WALker itself dones't do any actions, it just identifies the kind of WALs and invokes a corresponding callback of plugins.
+
 # Installation
 Since WALker requires PostgreSQL source codes to build please download PostgreSQL source code from [here](https://www.postgresql.org/ftp/source/). The WALker support PostgreSQL 10.0 or highe
 
