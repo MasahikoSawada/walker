@@ -21,7 +21,6 @@
 #include "access/xlogutils.h"
 #include "access/transam.h"
 #include "access/heapam_xlog.h"
-#include "lib/dshash.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
@@ -30,6 +29,7 @@
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 #include "utils/memutils.h"
 
 PG_MODULE_MAGIC;
