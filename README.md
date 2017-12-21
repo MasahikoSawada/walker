@@ -90,4 +90,4 @@ typedef void (*WalkerCallbackXact_cb) (XLogReaderState *record);
 * Is the WALker same as logical decoding plugin?
   * No. The Logical decoding plugins cannot retrieve WALs of wihch correponding transaction is rollbacked or aborted. Also, logical decoding plugin's function are invoked at commit of the transaction. On the other hand, WALker simply read through all WAL record including both aborted record and committed record.
 * What can we use WALker for?
-  * I think WALker has unlimited possibilities. This repository has a sample plugin called `heatmap`. This plugin collect gerbage information of all heap and generate heat map which helps us to reclaim garbage more effeciency.
+  * I think WALker has unlimited possibilities. This repository has a sample plugin called `heatmap`. This plugin collect gerbage information of all heap and generate heat map which helps us to reclaim garbage more effeciency. Also, WALker doesn't put a restriction regarding GUC parameters.
