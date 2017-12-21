@@ -1,10 +1,8 @@
 # WALker
 
-A pluggable background worker walking through WAL records for PostgreSQL.
+A simple, pluggable background worker for PostgreSQL, walking over WAL.
 
-# Usage
-
-## Installation
+# Installation
 Since WALker requires PostgreSQL source codes to build please download PostgreSQL source code from [here](https://www.postgresql.org/ftp/source/). The WALker support PostgreSQL 10.0 or highe
 
 1. Extract PostgreSQL source code and go to contrib/ directory
@@ -22,6 +20,8 @@ $ make
 $ su
 # make install
 ```
+
+# Usage
 
 ## Setting
 WALker provide only one GUC parameter `walker.plugins`. Setting comma-separated plugins list to `walker.plugins` to postgresql.conf
