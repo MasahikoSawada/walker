@@ -22,8 +22,6 @@ $ psql
 $ sh gen_map.sh <db name> <table name>
 ```
 
-Generate two graphes.
-
 ![garbage map](images/gmap.png)
 
 ![garage histgram](images/ghist.png)
