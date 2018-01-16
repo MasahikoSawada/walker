@@ -24,9 +24,9 @@ $ sh gen_map.sh <db name> <table name>
 
 Generate two graphes.
 
-![images/gmap.png]
+![garbage map](images/gmap.png)
 
-![images/ghist.png]
+![garage histgram](images/ghist.png)
 
 ## WALker background worker 
 ### Generate garbagemap for each heap relations
