@@ -15,11 +15,24 @@ walker.plugins = 'garbagemap'
 ```
 
 # Usage
+## Generate heatmap and histgram
+```
+$ psql
+=# CREATE EXTENSION garbagemap;
+$ sh gen_map.sh <db name> <table name>
+```
 
-## Generate garbagemap for each heap relations
+Generate two graphes.
+
+![images/gmap.png]
+
+![images/ghist.png]
+
+## WALker background worker 
+### Generate garbagemap for each heap relations
 Using GarbageMap, you can generate garbagemap of each heap relations, which has a information of pages having dead tuples.
 
-## Reporting garbagemap summary
+### Reporting garbagemap summary
 GarbageMap logs the summary of all garbagemaps whenever CHECKPOINT is executed to PostgreSQL sever log (LOG level). Example is,
 
 ```
