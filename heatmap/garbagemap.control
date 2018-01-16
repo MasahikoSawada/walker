@@ -1,0 +1,5 @@
+# garbagemap extension
+comment = 'contruct garbage maps'
+default_version = '1.0'
+module_pathname = '$libdir/garbagemap'
+relocatable = true

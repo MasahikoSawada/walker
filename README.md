@@ -29,10 +29,10 @@ WALker provides only one GUC parameter `walker.plugins`. Setting comma-separated
 ```bash
 $ vim /path/to/postgresql.conf
 shared_preload_libraries = 'walker'
-walker.plugins = 'heatmap'
+walker.plugins = 'garbagemap'
 ```
 # WALker Plugins
-WALker is designed to be used together with multile exernal functionalities, WALker itself doesn't do any action. This repository has [heatmap](https://github.com/MasahikoSawada/walker/tree/master/heatmap) plugin. Please refer it as an example.
+WALker is designed to be used together with multile exernal functionalities, WALker itself doesn't do any action. This repository has [garbagemap](https://github.com/MasahikoSawada/walker/tree/master/garbagemap) plugin. Please refer it as an example.
 
 ## Requirment
 WALker plugin has to include `walker.h`.
@@ -98,4 +98,4 @@ typedef void (*WalkerCallbackSmgr_cb) (XLogReaderState *record);
 * Is the WALker same as logical decoding plugin?
   * No, at least now. The Logical decoding plugins cannot retrieve WALs of wihch correponding transaction is rollbacked or aborted. Also, logical decoding plugin's function are invoked at commit of the transaction. On the other hand, WALker reads through all WAL record including both aborted record and committed record. Also, WALker doesn't put a restriction regarding GUC parameters.
 * What can we use WALker for?
-  * I think WALker has unlimited possibilities. This repository has a sample plugin called `heatmap`. This plugin collect garbage information of all heap and generate heat map which helps us to reclaim garbage more effeciency.
+  * I think WALker has unlimited possibilities. This repository has a sample plugin called `garbagemap`. This plugin collect garbage information of all heap and generate heat map which helps us to reclaim garbage more effeciency.
