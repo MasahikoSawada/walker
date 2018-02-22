@@ -5,6 +5,6 @@ set grid
 set xlabel "Block number"
 set ylabel "# of dead tuples"
 set xrange[0:ymax]
-set title "Histgram(".table.")"
+set title "Histgram(".table.":".range.")"
 
 plot infile with boxes title "# of dead tuples"
