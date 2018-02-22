@@ -115,6 +115,9 @@ WALkerInit(void)
 	List *plugin_list;
 	ListCell *cell;
 
+	if (walker_plugins == NULL || walker_plugins[0] == '\0')
+		return;
+
 	if (!SplitIdentifierString(walker_plugins, ',', &plugin_list))
 		elog(ERROR, "plugin syntax is invalid");
 
