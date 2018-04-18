@@ -6,7 +6,7 @@ PGFILEDESC = "walker"
 subdir = contrib/walker
 OBJS = walker.o xlogreader.o
 
-SUBDIRS = heatmap
+SUBDIRS = garbagemap
 
 ifdef USE_PGXS
 PG_CONFIG = pg_config

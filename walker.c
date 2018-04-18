@@ -178,7 +178,7 @@ WALkerMain(Datum main_arg)
 	BackgroundWorkerUnblockSignals();
 
 	/* Connect to our database */
-	BackgroundWorkerInitializeConnection("postgres", NULL);
+	BackgroundWorkerInitializeConnection("postgres", NULL, 0);
 
 #if PG_VERSION_NUM >= 110000
 	xlogreader_state = XLogReaderAllocate(wal_segment_size, &read_local_xlog_page,

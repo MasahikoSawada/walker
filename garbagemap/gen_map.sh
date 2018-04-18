@@ -25,4 +25,6 @@ res=`${PSQL} -c "COPY (SELECT rownum, n_dead_tuples, percent FROM tmp_mv ORDER B
 rows=`echo $res | sed 's/.*COPY \(.*\).*/\1/g'`
 gnuplot -e "ymax=${rows};infile='${DATA}';table='${TABLE}'" g_sortedhist.gnu
 
+${PSQL} -c "select count(n_all_visible), pg_relation_size('${TABLE}') / 8192, count(n_all_visible)::numeric(10,4) / (pg_relation_size('${TABLE}') /  8192) from tmp_mv where n_all_visible = 0"
+
 ${PSQL} -c "drop materialized view tmp_mv"
