@@ -266,8 +266,13 @@ WALkerProcessRecord(XLogReaderState *record)
 			}
 			break;
 
-			/* Not support yet */
 			case RM_STANDBY_ID:
+			{
+				if (cb->standby_cb)
+					cb->standby_cb(record);
+			}
+			break;
+			/* Not support yet */
 			case RM_LOGICALMSG_ID:
 			case RM_CLOG_ID:
 			case RM_DBASE_ID:
