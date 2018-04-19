@@ -26,11 +26,13 @@
 #include "access/heapam_xlog.h"
 #include "catalog/pg_control.h"
 #include "catalog/storage_xlog.h"
+#include "commands/vacuum.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include "replication/syncrep.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
@@ -40,6 +42,7 @@
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/relfilenodemap.h"
+#include "utils/rel.h"
 
 #define	GARBAGE_SUMMARY_COLS 5
 
@@ -67,6 +70,11 @@ PG_FUNCTION_INFO_V1(garbage_summary);
 /* Operation kind */
 #define GM_KIND_INS 0
 #define GM_KIND_DEL 1
+
+#define GMAP_DIRNAME "pg_gmap"
+
+#define GetGarbageMapFilePath(buf, node) \
+	snprintf(buf, MAXPGPATH, "./%s/%d.%d", GMAP_DIRNAME, node.dbNode, node.relNode)
 
 typedef int GarbageMapSlot;
 
@@ -110,6 +118,11 @@ extern void _PG_walker_plugin_init(WALkerCallbacks *cb);
 
 void		_PG_init(void);
 
+/* Hook function */
+static VacuumWorkItem *garbagemap_workitem_hook(Relation onerel,
+												VacuumWorkItem *workitem,
+												int options);
+
 /* Callback functions */
 static void garbagemap_startup(void);
 static void garbagemap_heap(XLogReaderState *record);
@@ -136,20 +149,26 @@ static void GMTranQueueCount_common(RelFileNode node, TransactionId xid, BlockNu
 static void GMRelCountVacuum(RelFileNode node, BlockNumber blk, int count);
 static void GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_nodes, int nrels,
 							 bool isCommit);
+static void GMRelWriteDumpFile(GarbageMapRel *gmaprel);
+static bool GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel);
 
 static void put_tuple(Tuplestorestate *tupstore, TupleDesc tupdesc, RangeStat stat);
 
 static GarbageMapTran *get_gmaptran(RelFileNode node, TransactionId xid, BlockNumber blk);
 static GarbageMapTran *get_new_gmaptran(void);
 static int gmaptran_compare(const void *a, const void *b);
-
+static inline void gmaprel_get_range(GarbageMapSlot slot, BlockNumber *start, BlockNumber *end);
 
 /* Debug purpose */
 static void GMRelSummary(void);
 static char *GarbagemapDump(int *garbagemap);
 
+/* hash table for walker */
 static HTAB *GarbageMapRelHash;
 static HTAB *GarbageMapTranHash;
+
+/* hash table for local backend */
+static HTAB *GarbageMapRelLocalHash;
 
 void
 _PG_init(void)
@@ -164,6 +183,7 @@ _PG_init(void)
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
+	vacuum_get_workitem_hook = garbagemap_workitem_hook;
 }
 
 static void
@@ -438,8 +458,6 @@ garbagemap_heap2(XLogReaderState *record)
 			nowunused = nowdead + ndead;
 			nunused = (end - nowunused);
 
-			elog(WARNING, "vacuum nunused %d, ndead %d, nredi %d",
-				 nunused, ndead, nredirected);
 			GMRelCountVacuum(node, blkno, nunused + nredirected);
 			break;
 		}
@@ -510,9 +528,7 @@ static void
 garbagemap_smgr(XLogReaderState *record)
 {
 	uint8	info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
-	TransactionId xid;
 
-	xid =  XLogRecGetXid(record);
 	switch (info)
 	{
 		/* Ignore */
@@ -641,6 +657,9 @@ GMTranQueueCount_common(RelFileNode node, TransactionId xid, BlockNumber blk,
 {
 	GarbageMapTran	*gmaptran;
 
+	if (node.relNode < FirstNormalObjectId)
+		return;
+
 	/* Get tran entry */
 	gmaptran = get_gmaptran(node, xid, blk);
 
@@ -655,12 +674,14 @@ GMTranQueueCount_common(RelFileNode node, TransactionId xid, BlockNumber blk,
 			break;
 	}
 
+/*
 	elog(WARNING, "REC xid %u, node %u, slot %d, blk %d, cnd %d, val (%d,%d) kind %s",
 		 xid, node.relNode, TargetBlkToSlot(blk), blk,
 		 count,
 		 gmaptran->ins_value,
 		 gmaptran->del_value,
 		 (kind == GM_KIND_INS) ? "INS" : "DEL");
+*/
 }
 
 static GarbageMapTran *
@@ -755,6 +776,7 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 	bool			found;
 	ListCell		*cell;
 	GarbageMapRel	*cache;
+	List			*dump_rels = NIL;
 	int	i;
 
 	/* Get chain-ed transaction info */
@@ -806,12 +828,10 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 								  HASH_ENTER, &found);
 
 			if (!found)
-			{
 				MemSet(gmaprel->map, 0, sizeof(gmaprel->map));
-				elog(WARNING, "got new gmap rel for %d, [%d] = %d",
-					 cur->node.relNode,
-					 cur->slot, gmaprel->map[cur->slot]);
-			}
+
+			/* Remember rels to be dumped */
+			dump_rels = lappend(dump_rels, gmaprel);
 		}
 		else
 			gmaprel = cache;	/* same as prev relnode */
@@ -836,6 +856,10 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 			 cur->del_value);
 	}
 
+	/* Dump the all updated rels */
+	foreach(cell, dump_rels)
+		GMRelWriteDumpFile((GarbageMapRel *) lfirst(cell));
+	
 	/* Cleanup all transaction-garbage info */
 	list_free_deep(gmaptran_entry->list);
 	/* Cleanup transaction info */
@@ -858,6 +882,9 @@ GMRelCountVacuum(RelFileNode node, BlockNumber blk, int count)
 	GarbageMapSlot	slot;
 	bool			found;
 
+	if (node.relNode < FirstNormalObjectId)
+		return;
+
 	gmaprel = hash_search(GarbageMapRelHash,
 						  (void *) &node,
 						  HASH_ENTER, &found);
@@ -870,9 +897,11 @@ GMRelCountVacuum(RelFileNode node, BlockNumber blk, int count)
 	slot = TargetBlkToSlot(blk);
 	gmaprel->map[slot] -= count;
 
+/*
 	elog(WARNING, "VACUUM node %u, map[%d] = %d, cnt %d",
 		 gmaprel->node.relNode,
 		 slot, gmaprel->map[slot], count);
+*/
 }
 
 static int
@@ -908,7 +937,126 @@ void GMRelSummary(void)
 				(errmsg("\"%s\" [%s]",
 						get_rel_name(RelidByRelfilenode(node.spcNode, node.relNode)),
 						dumped_map)));
-		elog(WARNING, "max %u", MaxBlockNumber);
+		//GMRelWriteDumpFile(entry);
 	}
 	CommitTransactionCommand();
+}
+
+static void
+GMRelWriteDumpFile(GarbageMapRel *gmaprel)
+{
+	char filepath[MAXPGPATH];
+	FILE *fp;
+
+	GetGarbageMapFilePath(filepath, gmaprel->node);
+
+	fp = AllocateFile(filepath, PG_BINARY_W);
+
+	fwrite(gmaprel, sizeof(GarbageMapRel), 1, fp);
+	FreeFile(fp);
+//	elog(WARNING, "Dumped \"%s\"", filepath);
+}
+
+static bool
+GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel)
+{
+	char filepath[MAXPGPATH];
+	FILE *fp;
+
+	GetGarbageMapFilePath(filepath, node);
+
+	fp = AllocateFile(filepath, PG_BINARY_R);
+	
+	if (!fp)
+	{
+		elog(WARNING, "could not read dumped file \"%s\" for rel %d",
+			 filepath, node.relNode);
+		return false;
+	}
+	
+	fread(*gmaprel, sizeof(GarbageMapRel), 1, fp);
+	FreeFile(fp);
+//	elog(WARNING, "Read \"%s\" : rel %d", filepath, (*gmaprel)->node.relNode);
+	return true;
+}
+
+static VacuumWorkItem *
+garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
+{
+	GarbageMapRel	*gmaprel;
+	bool			found;
+	int				i;
+	BlockNumber		start,
+					end;
+	int				max, max_slot;
+
+	if (!GarbageMapRelLocalHash)
+	{
+		HASHCTL info;
+		info.keysize = sizeof(RelFileNode);
+		info.entrysize = sizeof(GarbageMapRel);
+		
+		GarbageMapRelLocalHash = hash_create("Garbage Local Map",
+											 1024,
+											 &info,
+											 HASH_ELEM | HASH_BLOBS);
+	}
+
+	gmaprel = hash_search(GarbageMapRelLocalHash,
+						  (void *) &(onerel->rd_node),
+						  HASH_ENTER, &found);
+
+	/* if not found, read from file */
+	if (!found)
+	{
+		if (!GMRelReadDumpFile(onerel->rd_node, &gmaprel))
+		{
+			/* Failed to read dump file, return back the given item */
+			hash_search(GarbageMapRelLocalHash,
+						(void *) &(onerel->rd_node),
+						HASH_REMOVE, NULL);
+			return workitem;
+		}
+	}		
+
+	/*
+	 * Okay, we got the garbage map for this relation here.
+	 * We consider more effecient way to vacuum this relation.
+	 */
+	max = 0;
+	max_slot = 0;
+	for (i = 0; i < MAP_RANGE_SIZE; i++)
+	{
+		if (max < gmaprel->map[i])
+		{
+			max_slot = i;
+			max = gmaprel->map[i];
+		}
+	}
+
+	gmaprel_get_range(max_slot, &start, &end);
+
+	workitem->wi_startblk = start;
+	workitem->wi_endblk = end;
+
+	ereport(LOG,
+			(errmsg("max slot %d val %d, new start %u, end %d",
+					max_slot, max, start, end)));
+
+	/* Dump for debugging */
+	{
+		char *dumpedmap = GarbagemapDump(gmaprel->map);
+		ereport(LOG,
+				(errmsg("backend : \"%s\" [%s]",
+						RelationGetRelationName(onerel), dumpedmap)));
+	}
+
+	return workitem;
+}
+
+static inline void
+gmaprel_get_range(GarbageMapSlot slot, BlockNumber *start, BlockNumber *end)
+{
+	*start = MAP_RANGE_SIZE * slot;
+	*end = MAP_RANGE_SIZE * (slot + 1) -1;
 }
