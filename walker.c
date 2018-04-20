@@ -26,6 +26,7 @@
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include "replication/syncrep.h"
+#include "replication/slot.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
@@ -47,12 +48,14 @@ void _PG_init(void);
 void WALkerMain(Datum main_arg);
 
 static void WALkerProcessRecord(XLogReaderState *record);
+static void	WalkerCreateReplicationSlot(char *slot_name);
 
 /* Pointer to state data */
 static struct WALkerStateData *WALkerState;
 
 /* GUC parameter */
 static char *walker_plugins;	/* comma-separated plugin list */
+static char *walker_slot_name;
 
 /* flags set by signal handlers */
 sig_atomic_t got_sighup = false;
@@ -89,6 +92,16 @@ _PG_init(void)
 							   NULL,
 							   NULL,
 							   NULL);
+	DefineCustomStringVariable("walker.slot_name",
+							   "Sets replication slot name for walker process",
+							   NULL,
+							   &walker_slot_name,
+							   "walker_slot",	/* boot value */
+							   PGC_POSTMASTER,
+							   0,
+							   NULL,
+							   NULL,
+							   NULL);
 
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
 		BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -116,7 +129,8 @@ WALkerInit(void)
 	ListCell *cell;
 
 	if (walker_plugins == NULL || walker_plugins[0] == '\0')
-		return;
+		ereport(ERROR,
+				(errmsg("plugin name is not provided")));
 
 	if (!SplitIdentifierString(walker_plugins, ',', &plugin_list))
 		elog(ERROR, "plugin syntax is invalid");
@@ -156,6 +170,9 @@ WALkerInit(void)
 		/* Add to plugin list */
 		WALkerState->plugins = lappend(WALkerState->plugins, callbacks);
 	}
+
+	/* Create and attach replication slot */
+	WalkerCreateReplicationSlot(walker_slot_name);
 
 	MemoryContextSwitchTo(ctx);
 }
@@ -209,13 +226,21 @@ WALkerMain(Datum main_arg)
 		 * Read a record. Wait for new record if it is not generated yet.
 		 */
 		record = XLogReadRecord(xlogreader_state, lsn, &errmsg);
-		lsn = InvalidXLogRecPtr;
 
 		if (record == NULL)
 			elog(ERROR, "could not read WAL at %X/%X",
-				 (uint32) (lsn >> 32), (uint32) lsn);
+				 (uint32) (xlogreader_state->EndRecPtr >> 32),
+				 (uint32) xlogreader_state->EndRecPtr);
+
+		lsn = InvalidXLogRecPtr;
 
 		WALkerProcessRecord(xlogreader_state);
+
+		/* Advance replication slot's restart_lsn */
+		SpinLockAcquire(&MyReplicationSlot->mutex);
+		if (MyReplicationSlot->data.restart_lsn < xlogreader_state->EndRecPtr)
+			MyReplicationSlot->data.restart_lsn = xlogreader_state->EndRecPtr;
+		SpinLockRelease(&MyReplicationSlot->mutex);
 	}
 }
 
@@ -294,4 +319,18 @@ WALkerProcessRecord(XLogReaderState *record)
 				elog(ERROR, "unexpected RM_NEXT_ID rmgr_id: %u", (RmgrIds) XLogRecGetRmid(record));
 		}
 	}
+}
+
+static void
+WalkerCreateReplicationSlot(char *slot_name)
+{
+	CheckSlotRequirements();
+
+	/* Create a temporary replication slot */
+	ReplicationSlotCreate(slot_name, false, RS_TEMPORARY);
+
+	/* Reserve WAL and write this slot to disk */
+	ReplicationSlotReserveWal();
+	ReplicationSlotMarkDirty();
+	ReplicationSlotSave();
 }
