@@ -1181,7 +1181,7 @@ garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
 	 */
 
 	/* Dump for debugging */
-	elog(NOTICE, "backend : \"%s\" [%s]", RelationGetRelationName(onerel),
+	elog(LOG, "backend : \"%s\" [%s]", RelationGetRelationName(onerel),
 		 GarbagemapDump(gmaprel->map));
 
 	/* Choose one method */
@@ -1193,15 +1193,15 @@ garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
 	/* Set vacuum range for returning */
 	workitem->wi_vacrange = vacrange;
 
-	elog(NOTICE, "---- RESULT RANGE ----");
+	elog(LOG, "---- RESULT RANGE ----");
 	for (i = 0; workitem->wi_vacrange[i] != InvalidBlockNumber; i = i + 2)
 	{
 		BlockNumber start, end;
 		start = workitem->wi_vacrange[i];
 		end = workitem->wi_vacrange[i + 1];
-		elog(NOTICE, "range[%d] %d - %d (%d blks)", i, start, end, end - start + 1);
+		elog(LOG, "range[%d] %d - %d (%d blks)", i, start, end, end - start + 1);
 	}
-	elog(NOTICE, "----------------------");
+	elog(LOG, "----------------------");
 
 	return workitem;
 }
@@ -1225,7 +1225,7 @@ gmap_highest_one(Relation onerel, GarbageMapRel *gmaprel)
 	int 		i;
 	BlockNumber	*result = palloc(sizeof(BlockNumber) * (2 + 1));
 
-	elog(NOTICE, "----- Select one range having most garbage -----");
+	elog(LOG, "----- Select one range having most garbage -----");
 
 	/* Find highest one range */
 	for (i = 0; i < MAP_RANGE_SIZE; i++)
@@ -1234,7 +1234,7 @@ gmap_highest_one(Relation onerel, GarbageMapRel *gmaprel)
 		{
 			max_slot = i;
 			max = gmaprel->map[i];
-			elog(NOTICE, "map[%d] = %d", i, gmaprel->map[i]);
+			elog(LOG, "map[%d] = %d", i, gmaprel->map[i]);
 		}
 	}
 
@@ -1248,8 +1248,8 @@ gmap_highest_one(Relation onerel, GarbageMapRel *gmaprel)
 	result[0] = start;
 	result[1] = end;
 	result[2] = InvalidBlockNumber;
-	elog(NOTICE, "max slot %d val %d", max_slot, max);
-	elog(NOTICE, "-------------------------------------------------");
+	elog(LOG, "max slot %d val %d", max_slot, max);
+	elog(LOG, "-------------------------------------------------");
 
 	return result;
 }
@@ -1292,7 +1292,7 @@ gmap_highest_n(Relation onerel, GarbageMapRel *gmaprel)
 	ValueWithIndex vwi[MAP_RANGE_SIZE];
 	BlockNumber *result = palloc(sizeof(BlockNumber) * (N_CHOOSE * 2 + 1));
 
-	elog(NOTICE, "----- Select highest %d ranges -----", N_CHOOSE);
+	elog(LOG, "----- Select highest %d ranges -----", N_CHOOSE);
 
 	/* Construct mapping {value, idx} */
 	for (i = 0; i < MAP_RANGE_SIZE; i++)
@@ -1318,10 +1318,10 @@ gmap_highest_n(Relation onerel, GarbageMapRel *gmaprel)
 
 		result[cnt++] = start;
 		result[cnt++] = end;
-		elog(NOTICE, "map[%d] = %d, start %u, end %u", i, vwi[i].value,
+		elog(LOG, "map[%d] = %d, start %u, end %u", i, vwi[i].value,
 			 start, end);
 	}
-	elog(NOTICE, "-------------------------------------");
+	elog(LOG, "-------------------------------------");
 
 	result[cnt] = InvalidBlockNumber;
 
