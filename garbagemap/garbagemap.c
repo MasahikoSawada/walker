@@ -14,6 +14,7 @@
 #include "walker.h"
 
 /* These are always necessary for a bgworker */
+#include <unistd.h>
 #include "access/relscan.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
@@ -75,7 +76,7 @@ PG_FUNCTION_INFO_V1(garbage_summary);
 #define GMAP_DIRNAME "pg_gmap"
 
 #define GetGarbageMapFilePath(buf, node) \
-	snprintf(buf, MAXPGPATH, "./%s/%d.%d", GMAP_DIRNAME, node.dbNode, node.relNode)
+	snprintf(buf, MAXPGPATH, "./%s/%d.%d", GMAP_DIRNAME, node.spcNode, node.relNode)
 
 typedef int GarbageMapSlot;
 
@@ -154,9 +155,10 @@ static void GMTranQueueCount_common(RelFileNode node, TransactionId xid, BlockNu
 static void GMRelCountVacuum(RelFileNode node, BlockNumber blk, int count);
 static void GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_nodes, int nrels,
 							 bool isCommit);
-static void GMRelWriteDumpFile(GarbageMapRel *gmaprel);
+static void GMRelWriteDumpFile(GarbageMapRel *gmaprel, bool start_tx);
 static void GMRelDumpALl(void);
-static bool GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel);
+static bool GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel,
+							  char **relname);
 
 static void put_tuple(Tuplestorestate *tupstore, TupleDesc tupdesc, RangeStat stat);
 
@@ -199,7 +201,7 @@ _PG_init(void)
 							"Sets the minimum amount of table data for range vacuum",
 							NULL,
 							&min_range_vacuum_size,
-							1024 * 1024 * 1024, /* 1GB */
+							1024 * 1024, /* 1GB */
 							0,
 							INT_MAX,
 							PGC_USERSET,
@@ -364,6 +366,8 @@ garbagemap_startup(void)
 {
 	MemoryContext ctx;
 	HASHCTL	info;
+	DIR		*dir;
+	struct dirent *de;
 
 	ctx = MemoryContextSwitchTo(TopMemoryContext);
 
@@ -382,6 +386,25 @@ garbagemap_startup(void)
 									 &info,
 									 HASH_ELEM | HASH_BLOBS);
 	MemoryContextSwitchTo(ctx);
+
+	/* Read all dumped files */
+	dir = AllocateDir("pg_gmap");
+	while ((de = ReadDir(dir, "pg_gmap")) != NULL)
+	{
+		RelFileNode n;
+		GarbageMapRel *gmaprel;
+		char *relname = NULL;
+
+		/* Skip special stuff */
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+			continue;
+
+		sscanf(de->d_name, "%d.%d", &n.spcNode, &n.relNode);
+		gmaprel = hash_search(GarbageMapRelHash, (void *) &(n.relNode),
+							  HASH_ENTER, NULL);
+
+		GMRelReadDumpFile(n, &gmaprel, &relname);
+	}
 }
 
 /*
@@ -412,16 +435,22 @@ garbagemap_heap(XLogReaderState *record)
 			GMTranQueueCountDelete(node, xid, blkno, 1);
 			break;
 		case XLOG_HEAP_HOT_UPDATE:
+			/* HOT update doesn't make garbage? */
 			GMTranQueueCountDelete(node, xid, blkno, 1);
+			GMTranQueueCountInsert(node, xid, blkno, 1);
 			break;
 		case XLOG_HEAP_UPDATE:
 			{
 				BlockNumber newblkno, oldblkno;
 
 				XLogRecGetBlockTag(record, 0, &node, NULL, &newblkno);
-				GMTranQueueCountInsert(node, xid, blkno, 1);
+				GMTranQueueCountInsert(node, xid, newblkno, 1);
+
 				if (XLogRecGetBlockTag(record, 1, NULL, NULL, &oldblkno))
-					GMTranQueueCountDelete(node, xid, blkno, 1);
+					GMTranQueueCountDelete(node, xid, oldblkno, 1);
+				else
+					GMTranQueueCountDelete(node, xid, newblkno, 1);
+
 				break;
 			}
 		/* Ignore */
@@ -479,8 +508,10 @@ garbagemap_heap2(XLogReaderState *record)
 			end = (OffsetNumber *) ((char *) redirected + datalen);
 			nowdead = redirected + (nredirected * 2);
 			nowunused = nowdead + ndead;
-			nunused = (end - nowunused);
+			nunused = Max(end - nowunused, 0);
 
+//			elog(WARNING, "rel %d, blk %u, ndead %d, nunused %d, nredirected %d",
+//				 node.relNode, blkno, ndead, nunused, nredirected);
 			GMRelCountVacuum(node, blkno, nunused + nredirected);
 			break;
 		}
@@ -721,7 +752,6 @@ GMTranQueueCount_common(RelFileNode node, TransactionId xid, BlockNumber blk,
 			gmaptran->del_value += count;
 			break;
 	}
-
 /*
 	elog(WARNING, "REC xid %u, node %u, slot %d, blk %d, cnd %d, val (%d,%d) kind %s",
 		 xid, node.relNode, TargetBlkToSlot(blk), blk,
@@ -832,7 +862,10 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 														 (void *) &xid,
 														 HASH_ENTER, &found);
 	if (!found)
+	{
+		goto cleanup;
 		return;
+	}
 
 	/* Sort by RelFileNode*/
 	gmaptran_entry->list = list_qsort(gmaptran_entry->list, gmaptran_compare);
@@ -847,6 +880,7 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 		GarbageMapTran	*cur = lfirst(cell);
 		GarbageMapRel	*gmaprel;
 		bool			found;
+		bool			skip = false;
 
 		/*
 		 * If this transaction did TRANCATE, we ignore the trans info
@@ -856,11 +890,11 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 		{
 			if (RelFileNodeEquals(cur->node, ignore_rels[i]))
 			{
-				found = true;
+				skip = true;
 				break;
 			}
 		}
-		if (found)
+		if (skip)
 			continue;
 
 		/*
@@ -890,19 +924,18 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 			gmaprel->map[cur->slot] += cur->ins_value;
 
 		/* Keep sane value */
-		if (gmaprel->map[cur->slot] < 0)
-			gmaprel->map[cur->slot] = 0;
+//		if (gmaprel->map[cur->slot] < 0)
+//			gmaprel->map[cur->slot] = 0;
 
 		/* cache the this rel */
 		cache = gmaprel;
 
 		/*
-		elog(WARNING, "GATGER xid %u, node %u, map[%d] = %d, val (%d,%d)",
+		elog(WARNING, "GATGER xid %u, node %u, map[%d] = %d, did +%d",
 			 cur->xid,
 			 gmaprel->node.relNode,
 			 cur->slot, gmaprel->map[cur->slot],
-			 cur->ins_value,
-			 cur->del_value);
+			 isCommit ? cur->del_value : cur->ins_value);
 		*/
 	}
 
@@ -912,7 +945,7 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 	{
 //		GarbageMapRel *gmaprel = lfirst(cell);
 
-		GMRelWriteDumpFile((GarbageMapRel *) lfirst(cell));
+		GMRelWriteDumpFile((GarbageMapRel *) lfirst(cell), true);
 //		elog(WARNING, "walker : rel:%d [%s]", gmaprel->node.relNode,
 //			 GarbagemapDump(gmaprel->map));
 	}
@@ -922,10 +955,18 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 	/* Cleanup transaction info */
 	hash_search(GarbageMapTranHash, (void *) &xid,
 				HASH_REMOVE, NULL);
+cleanup:
 	/* Cleanup truncated rels */
 	for (i = 0; i < nrels; i++)
+	{
+		char filepath[MAXPGPATH];
+
 		hash_search(GarbageMapRelHash, (void *) &ignore_rels[i],
 					HASH_REMOVE, NULL);
+		GetGarbageMapFilePath(filepath, ignore_rels[i]);
+		unlink(filepath);
+		elog(WARNING, "unlinked %s", filepath);
+	}
 }
 
 /*
@@ -954,20 +995,20 @@ GMRelCountVacuum(RelFileNode node, BlockNumber blk, int count)
 	slot = TargetBlkToSlot(blk);
 	gmaprel->map[slot] -= count;
 
+	if (gmaprel->map[slot] < 0)
+		gmaprel->map[slot] = 0;
+
 	vacuum_counted++;
 
 	/* Once we replayed blocks for a range, dump/notify backend */
 	if (vacuum_counted >= MAP_RANGE_SIZE)
 	{
-		GMRelWriteDumpFile(gmaprel);
+		GMRelWriteDumpFile(gmaprel, true);
 		vacuum_counted = 0;
 	}
 
-	/*
-	elog(WARNING, "VACUUM node %u, map[%d] = %d, cnt %d",
-		 gmaprel->node.relNode,
-		 slot, gmaprel->map[slot], count);
-	*/
+//	elog(WARNING, "VACUUM node %u, map[%d] = %d, did -%d",
+//		 gmaprel->node.relNode, slot, gmaprel->map[slot], count);
 }
 
 static int
@@ -999,11 +1040,18 @@ void GMRelSummary(void)
 		char *dumped_map = GarbagemapDump(entry->map);
 		RelFileNode node = entry->node;
 
+		if (get_rel_name(RelidByRelfilenode(node.spcNode, node.relNode)) == NULL)
+		{
+			char filepath[MAXPGPATH];
+			GetGarbageMapFilePath(filepath, node);
+			unlink(filepath);
+			continue;
+		}
+
 		ereport(LOG,
 				(errmsg("\"%s\" [%s]",
 						get_rel_name(RelidByRelfilenode(node.spcNode, node.relNode)),
 						dumped_map)));
-		//GMRelWriteDumpFile(entry);
 	}
 	CommitTransactionCommand();
 }
@@ -1014,20 +1062,25 @@ GMRelDumpALl(void)
 	HASH_SEQ_STATUS status;
 	GarbageMapRel *entry;
 
+	StartTransactionCommand();
 	hash_seq_init(&status, GarbageMapRelHash);
 
 	while ((entry = (GarbageMapRel *) hash_seq_search(&status)) != NULL)
-		GMRelWriteDumpFile(entry);
+		GMRelWriteDumpFile(entry, false);
+	CommitTransactionCommand();
 }
 
 static void
-GMRelWriteDumpFile(GarbageMapRel *gmaprel)
+GMRelWriteDumpFile(GarbageMapRel *gmaprel, bool start_tx)
 {
 	char filepath[MAXPGPATH];
+	char relname[NAMEDATALEN];
 	FILE *fp;
 
 	GetGarbageMapFilePath(filepath, gmaprel->node);
 
+	if (start_tx)
+		StartTransactionCommand();
 	fp = AllocateFile(filepath, PG_BINARY_W);
 	if (!fp)
 	{
@@ -1036,15 +1089,25 @@ GMRelWriteDumpFile(GarbageMapRel *gmaprel)
 		return;
 	}
 
+	/* Write relation name */
+	snprintf(relname, NAMEDATALEN, "%s",
+			 get_rel_name(RelidByRelfilenode(gmaprel->node.spcNode, gmaprel->node.relNode)));
+	fwrite(relname, NAMEDATALEN, 1, fp);
+
+	/* Write garbage map */
 	fwrite(gmaprel, sizeof(GarbageMapRel), 1, fp);
 	FreeFile(fp);
-//	elog(WARNING, "Dumped \"%s\", len %lu", filepath, sizeof(GarbageMapRel));
+
+	if (start_tx)
+		CommitTransactionCommand();
+//	elog(LOG, "Dumped \"%s\", len %lu", filepath, sizeof(GarbageMapRel));
 }
 
 static bool
-GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel)
+GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel, char **relname)
 {
 	char filepath[MAXPGPATH];
+	char rname[NAMEDATALEN];
 	FILE *fp;
 
 	GetGarbageMapFilePath(filepath, node);
@@ -1058,9 +1121,13 @@ GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel)
 		return false;
 	}
 
+	fread(rname, NAMEDATALEN, 1, fp);
+	*relname = pstrdup(rname);
+
 	fread(*gmaprel, sizeof(GarbageMapRel), 1, fp);
 	FreeFile(fp);
-//	elog(WARNING, "Read \"%s\" : rel %d", filepath, (*gmaprel)->node.relNode);
+//	elog(WARNING, "Read \"%s\" : rel %d, relname \"%s\"",
+//		 filepath, (*gmaprel)->node.relNode, *relname);
 	return true;
 }
 
@@ -1097,7 +1164,9 @@ garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
 //	if (!found)
 	if (true)	/* Always read from file!! */
 	{
-		if (!GMRelReadDumpFile(onerel->rd_node, &gmaprel))
+		char *relname = NULL;
+
+		if (!GMRelReadDumpFile(onerel->rd_node, &gmaprel, &relname))
 		{
 			hash_search(GarbageMapRelLocalHash,
 						(void *) &(onerel->rd_node),
@@ -1130,7 +1199,7 @@ garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
 		BlockNumber start, end;
 		start = workitem->wi_vacrange[i];
 		end = workitem->wi_vacrange[i + 1];
-		elog(NOTICE, "range[%d] %d - %d (%d blks)", i, start, end, end - start);
+		elog(NOTICE, "range[%d] %d - %d (%d blks)", i, start, end, end - start + 1);
 	}
 	elog(NOTICE, "----------------------");
 
@@ -1249,7 +1318,8 @@ gmap_highest_n(Relation onerel, GarbageMapRel *gmaprel)
 
 		result[cnt++] = start;
 		result[cnt++] = end;
-		elog(NOTICE, "map[%d] = %d", i, vwi[i].value);
+		elog(NOTICE, "map[%d] = %d, start %u, end %u", i, vwi[i].value,
+			 start, end);
 	}
 	elog(NOTICE, "-------------------------------------");
 

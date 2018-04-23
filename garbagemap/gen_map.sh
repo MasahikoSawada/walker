@@ -1,6 +1,6 @@
 DBNAME=${1:-postgres}
-TABLE=${2:-hoge}
-RANGE=${3:-1280} # 10MB
+TABLE=${2:-pgbench_accounts}
+RANGE=${3:-4096} # 10MB
 DATA="/tmp/data.csv"
 
 PSQL="p master -d ${DBNAME} -X"
