@@ -157,8 +157,7 @@ static void GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_nodes, int n
 							 bool isCommit);
 static void GMRelWriteDumpFile(GarbageMapRel *gmaprel, bool start_tx);
 static void GMRelDumpALl(void);
-static bool GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel,
-							  char **relname);
+static bool GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel);
 
 static void put_tuple(Tuplestorestate *tupstore, TupleDesc tupdesc, RangeStat stat);
 
@@ -393,7 +392,6 @@ garbagemap_startup(void)
 	{
 		RelFileNode n;
 		GarbageMapRel *gmaprel;
-		char *relname = NULL;
 
 		/* Skip special stuff */
 		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
@@ -403,7 +401,7 @@ garbagemap_startup(void)
 		gmaprel = hash_search(GarbageMapRelHash, (void *) &(n.relNode),
 							  HASH_ENTER, NULL);
 
-		GMRelReadDumpFile(n, &gmaprel, &relname);
+		GMRelReadDumpFile(n, &gmaprel);
 	}
 }
 
@@ -1074,7 +1072,6 @@ static void
 GMRelWriteDumpFile(GarbageMapRel *gmaprel, bool start_tx)
 {
 	char filepath[MAXPGPATH];
-	char relname[NAMEDATALEN];
 	FILE *fp;
 
 	GetGarbageMapFilePath(filepath, gmaprel->node);
@@ -1089,11 +1086,6 @@ GMRelWriteDumpFile(GarbageMapRel *gmaprel, bool start_tx)
 		return;
 	}
 
-	/* Write relation name */
-	snprintf(relname, NAMEDATALEN, "%s",
-			 get_rel_name(RelidByRelfilenode(gmaprel->node.spcNode, gmaprel->node.relNode)));
-	fwrite(relname, NAMEDATALEN, 1, fp);
-
 	/* Write garbage map */
 	fwrite(gmaprel, sizeof(GarbageMapRel), 1, fp);
 	FreeFile(fp);
@@ -1104,10 +1096,9 @@ GMRelWriteDumpFile(GarbageMapRel *gmaprel, bool start_tx)
 }
 
 static bool
-GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel, char **relname)
+GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel)
 {
 	char filepath[MAXPGPATH];
-	char rname[NAMEDATALEN];
 	FILE *fp;
 
 	GetGarbageMapFilePath(filepath, node);
@@ -1121,13 +1112,10 @@ GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel, char **relname)
 		return false;
 	}
 
-	fread(rname, NAMEDATALEN, 1, fp);
-	*relname = pstrdup(rname);
-
 	fread(*gmaprel, sizeof(GarbageMapRel), 1, fp);
 	FreeFile(fp);
-//	elog(WARNING, "Read \"%s\" : rel %d, relname \"%s\"",
-//		 filepath, (*gmaprel)->node.relNode, *relname);
+//	elog(WARNING, "Read \"%s\" : rel %d",
+//		 filepath, (*gmaprel)->node.relNode);
 	return true;
 }
 
@@ -1164,9 +1152,7 @@ garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
 //	if (!found)
 	if (true)	/* Always read from file!! */
 	{
-		char *relname = NULL;
-
-		if (!GMRelReadDumpFile(onerel->rd_node, &gmaprel, &relname))
+		if (!GMRelReadDumpFile(onerel->rd_node, &gmaprel))
 		{
 			hash_search(GarbageMapRelLocalHash,
 						(void *) &(onerel->rd_node),
