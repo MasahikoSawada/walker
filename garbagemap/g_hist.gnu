@@ -1,8 +1,8 @@
 set terminal png
-set output "/mnt/hgfs/Share/garbagemap/".table."_hist.png"
+set output "/mnt/hgfs/Share/garbagemap/".time."_".table."_hist.png"
 set ytics nomirror
 set grid
-set xlabel "Block number"
+set xlabel "Range Number"
 set ylabel "# of dead tuples"
 set xrange[0:ymax]
 set title "Histgram(".table.":".range.")"

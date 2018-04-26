@@ -13,6 +13,10 @@ CREATE FUNCTION garbage_summary(
 AS 'MODULE_PATHNAME', 'garbage_summary'
 LANGUAGE C STRICT PARALLEL UNSAFE;
 
+CREATE FUNCTION pg_gmap_from_file(relname regclass) RETURNS text
+AS 'MODULE_PATHNAME', 'pg_gmap_from_file'
+LANGUAGE C STRICT PARALLEL UNSAFE;
+
 -- garbage_summary  + dead_tuple_ratio
 CREATE OR REPLACE FUNCTION gs(
        rel regclass,

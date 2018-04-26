@@ -113,6 +113,7 @@ _PG_init(void)
 	worker.bgw_notify_pid = 0;
 
 	snprintf(worker.bgw_name, BGW_MAXLEN, "walker");
+	snprintf(worker.bgw_type, BGW_MAXLEN, "walker");
 	worker.bgw_main_arg = Int32GetDatum(1);
 	RegisterBackgroundWorker(&worker);
 }

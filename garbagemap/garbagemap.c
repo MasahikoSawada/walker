@@ -15,6 +15,7 @@
 
 /* These are always necessary for a bgworker */
 #include <unistd.h>
+#include <sys/stat.h>
 #include "access/relscan.h"
 #include "access/visibilitymap.h"
 #include "access/xact.h"
@@ -39,6 +40,7 @@
 #include "storage/proc.h"
 #include "storage/bufmgr.h"
 #include "storage/standbydefs.h"
+#include "storage/condition_variable.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
@@ -51,23 +53,25 @@
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(garbage_summary);
+PG_FUNCTION_INFO_V1(pg_gmap_from_file);
 
 /*
  * Garbagemap array size.
- * MapLength = TotalBlockSize/Range (Blocks/Range)
+ * MapSize = TotalBlockSize/Range (Blocks/Range)
  * ------------------------
  * 8192  = 4 GB/range
  * 1 MB  = 32 MB/range (4096 blks/range)
  *
  * Note that actual map size is MapLength * 4byte so far.
  */
-#define MAP_SIZE (1024 * 1024)
+//#define MAP_SIZE (1024 * 1024)
+#define MAP_LENGTH (1024 * 1024 * 4)	/* i.g, MAP_N_RANGES = 1024 */
 
 /* Size of each range */
-#define MAP_RANGE_SIZE (MaxBlockNumber / MAP_SIZE)
+#define MAP_N_RANGES (MaxBlockNumber / MAP_LENGTH)
 
 /* Convert target block number to slot of garbagemap */
-#define TargetBlkToSlot(blkno) (blkno / MAP_RANGE_SIZE)
+#define TargetBlkToSlot(blkno) (blkno / MAP_N_RANGES)
 
 /* Operation kind */
 #define GM_KIND_INS 0
@@ -84,7 +88,7 @@ typedef int GarbageMapSlot;
 typedef struct GarbageMapRel
 {
 	RelFileNode	node;	/* Key */
-	int			map[MAP_SIZE];
+	int			map[MAP_LENGTH];
 } GarbageMapRel;
 
 /* Per transaction garbage info */
@@ -114,9 +118,31 @@ typedef struct RangStat
 	uint32	n_all_visible;
 } RangeStat;
 
+typedef struct GarbageMapShared
+{
+	pid_t	walker_pid;
+	ConditionVariable walker_cv;
+} GarbageMapShared;
+
 /* GUC parameter */
 static int32 summary_size;
 static int min_range_vacuum_size;
+static int range_vacuum_percent;
+
+/* hash table for walker */
+static HTAB *GarbageMapRelHash;
+static HTAB *GarbageMapTranHash;
+
+/* hash table for local backend */
+static HTAB *GarbageMapRelLocalHash;
+
+/* Shared memory space */
+static GarbageMapShared *GMShared = NULL;
+
+/* Saved hook values in case of unload */
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+
+static int vacuum_counted = 0;	/* track of number of vacuumed pages */
 
 /* Plugin handler function */
 extern void _PG_walker_plugin_init(WALkerCallbacks *cb);
@@ -153,11 +179,14 @@ static void GMTranQueueCountDelete(RelFileNode node, TransactionId xid, BlockNum
 static void GMTranQueueCount_common(RelFileNode node, TransactionId xid, BlockNumber blk,
 									int count, int kind);
 static void GMRelCountVacuum(RelFileNode node, BlockNumber blk, int count);
+static void GMRelCountSet(RelFileNode node, BlockNumber startblk, int count);
 static void GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_nodes, int nrels,
 							 bool isCommit);
 static void GMRelWriteDumpFile(GarbageMapRel *gmaprel, bool start_tx);
 static void GMRelDumpALl(void);
 static bool GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel);
+static bool GMRelGetLatestDataFromDumpFile(RelFileNode node, GarbageMapRel **gmaprel);
+static void GMShmemStartup(void);
 
 static void put_tuple(Tuplestorestate *tupstore, TupleDesc tupdesc, RangeStat stat);
 
@@ -169,19 +198,11 @@ static inline void gmaprel_get_range(GarbageMapSlot slot, BlockNumber *start, Bl
 /* Methods to calculate ranges */
 static BlockNumber *gmap_highest_one(Relation onerel, GarbageMapRel *gmaprel);
 static BlockNumber *gmap_highest_n(Relation onerel, GarbageMapRel *gmaprel);
+static BlockNumber *gmap_highest_n_percent(Relation onerel, GarbageMapRel *gmaprel);
 
 /* Debug purpose */
 static void GMRelSummary(void);
 static char *GarbagemapDump(int *garbagemap);
-
-/* hash table for walker */
-static HTAB *GarbageMapRelHash;
-static HTAB *GarbageMapTranHash;
-
-/* hash table for local backend */
-static HTAB *GarbageMapRelLocalHash;
-
-static int vacuum_counted = 0;	/* track of number of vacuumed pages */
 
 void
 _PG_init(void)
@@ -190,9 +211,19 @@ _PG_init(void)
 							"The number of blocks for summarizing",
 							NULL,
 							&summary_size,
-							320, /* 32 * 10 blocks */
+							1024, /* 1024 blocks = 8 MB */
 							1,
 							INT_MAX,
+							PGC_USERSET,
+							GUC_UNIT_BLOCKS,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("garbagemap.range_vacuum_percent",
+							"The ratio of pages being vacuumed",
+							NULL,
+							&range_vacuum_percent,
+							30,
+							0,
+							100,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
@@ -206,7 +237,12 @@ _PG_init(void)
 							PGC_USERSET,
 							GUC_UNIT_BLOCKS,
 							NULL, NULL, NULL);
+
+	RequestAddinShmemSpace(sizeof(GarbageMapShared));
+
 	vacuum_get_workitem_hook = garbagemap_workitem_hook;
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = GMShmemStartup;
 }
 
 static void
@@ -344,6 +380,31 @@ garbage_summary(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
+Datum
+pg_gmap_from_file(PG_FUNCTION_ARGS)
+{
+	Oid relid = PG_GETARG_OID(0);
+	GarbageMapRel *gmaprel = palloc(sizeof(GarbageMapRel));
+	char filepath[MAXPGPATH];
+	RelFileNode node;
+	Relation rel;
+
+	rel = heap_open(relid, AccessShareLock);
+	node = rel->rd_node;
+
+	GetGarbageMapFilePath(filepath, node);
+
+	GMRelReadDumpFile(node, &gmaprel);
+
+	elog(NOTICE, "\"%s\" [%s]", RelationGetRelationName(rel),
+		 GarbagemapDump(gmaprel->map));
+
+	heap_close(rel, AccessShareLock);
+	pfree(gmaprel);
+
+	PG_RETURN_NULL();
+}
+
 /* Initialize functions */
 void
 _PG_walker_plugin_init(WALkerCallbacks *cb)
@@ -357,6 +418,24 @@ _PG_walker_plugin_init(WALkerCallbacks *cb)
 	cb->standby_cb = garbagemap_standby;
 }
 
+static void
+GMShmemStartup(void)
+{
+	bool found;
+
+	GMShared = ShmemInitStruct("Gargabemap Shared",
+							   sizeof(GarbageMapShared),
+							   &found);
+	ConditionVariableInit(&(GMShared->walker_cv));
+}
+
+static void
+garbagemap_sigusr1(SIGNAL_ARGS)
+{
+	GMRelDumpALl();
+	ConditionVariableBroadcast(&(GMShared->walker_cv));
+}
+
 /*
  * Startup callback function.
  */
@@ -367,6 +446,12 @@ garbagemap_startup(void)
 	HASHCTL	info;
 	DIR		*dir;
 	struct dirent *de;
+
+	/* Set my PID */
+	GMShared->walker_pid = MyProcPid;
+
+	/* Set signal handler */
+	pqsignal(SIGUSR1, garbagemap_sigusr1);
 
 	ctx = MemoryContextSwitchTo(TopMemoryContext);
 
@@ -482,8 +567,16 @@ garbagemap_heap2(XLogReaderState *record)
 		/* Ignore */
 		case XLOG_HEAP2_REWRITE:
 		case XLOG_HEAP2_FREEZE_PAGE:
-		case XLOG_HEAP2_CLEANUP_INFO:
 			break;
+		case XLOG_HEAP2_CLEANUP_INFO:
+		{
+			xl_heap_cleanup_info *xlrec;
+
+			xlrec = (xl_heap_cleanup_info *) XLogRecGetData(record);
+			if (BlockNumberIsValid(xlrec->startblk))
+				GMRelCountSet(xlrec->node, xlrec->startblk, xlrec->new_dead_tuples);
+		}
+		break;
 
 		/* Make one page clean */
 		case XLOG_HEAP2_CLEAN:
@@ -510,12 +603,12 @@ garbagemap_heap2(XLogReaderState *record)
 
 //			elog(WARNING, "rel %d, blk %u, ndead %d, nunused %d, nredirected %d",
 //				 node.relNode, blkno, ndead, nunused, nredirected);
-			GMRelCountVacuum(node, blkno, nunused + nredirected);
+//			GMRelCountVacuum(node, blkno, nunused + nredirected);
 			break;
 		}
 		case XLOG_HEAP2_VISIBLE:
 //			XLogRecGetBlockTag(record, 1, &node, NULL, &blkno);
-//			GarbagemapCoolTemprature(node, blkno, MAP_RANGE_SIZE);
+//			GarbagemapCoolTemprature(node, blkno, MAP_N_RANGES);
 			break;
 
 		/* Make one page dirty */
@@ -611,7 +704,7 @@ garbagemap_standby(XLogReaderState *record)
 		case XLOG_INVALIDATIONS:
 		case XLOG_RUNNING_XACTS:
 			{
-				GMRelDumpALl();
+//				GMRelDumpALl();
 				break;
 			}
 		/* Ignore */
@@ -678,7 +771,7 @@ GarbagemapDump(int *garbagemap)
 	int		prev_temp = -1;
 	int		prev_temp_count = 0;
 
-	for (i = 0; i < MAP_SIZE; i++)
+	for (i = 0; i < MAP_LENGTH; i++)
 	{
 		cur_temp = garbagemap[i];
 
@@ -908,7 +1001,10 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 								  HASH_ENTER, &found);
 
 			if (!found)
+			{
+//				elog(WARNING, "memset 1");
 				MemSet(gmaprel->map, 0, sizeof(gmaprel->map));
+			}
 
 			/* Remember rels to be dumped */
 			dump_rels = lappend(dump_rels, gmaprel);
@@ -939,6 +1035,7 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 
 
 	/* Dump the all updated rels */
+	/*
 	foreach(cell, dump_rels)
 	{
 //		GarbageMapRel *gmaprel = lfirst(cell);
@@ -947,6 +1044,7 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 //		elog(WARNING, "walker : rel:%d [%s]", gmaprel->node.relNode,
 //			 GarbagemapDump(gmaprel->map));
 	}
+	*/
 
 	/* Cleanup all transaction-garbage info */
 	list_free_deep(gmaptran_entry->list);
@@ -963,8 +1061,43 @@ cleanup:
 					HASH_REMOVE, NULL);
 		GetGarbageMapFilePath(filepath, ignore_rels[i]);
 		unlink(filepath);
-		elog(WARNING, "unlinked %s", filepath);
+//		elog(WARNING, "unlinked %s", filepath);
 	}
+}
+
+static void
+GMRelCountSet(RelFileNode node, BlockNumber startblk, int count)
+{
+	GarbageMapRel	*gmaprel;
+	GarbageMapSlot	slot;
+	bool			found;
+
+	if (node.relNode < FirstNormalObjectId)
+		return;
+
+	gmaprel = hash_search(GarbageMapRelHash,
+						  (void *) &node,
+						  HASH_ENTER, &found);
+	if (!found)
+	{
+//		elog(WARNING, "memset 2");
+		MemSet(gmaprel->map, 0, sizeof(gmaprel->map));
+	}
+
+	slot = TargetBlkToSlot(startblk);
+	gmaprel->map[slot] = count;
+
+	/*
+	elog(WARNING, "COUNT SET map[%d] = %d, startblk %u [%s], map %p",
+		 slot,
+		 count,
+		 startblk,
+		 GarbagemapDump(gmaprel->map),
+p		 gmaprel->map);
+	*/
+
+	/* Dump file */
+	GMRelWriteDumpFile(gmaprel, false);
 }
 
 /*
@@ -986,7 +1119,7 @@ GMRelCountVacuum(RelFileNode node, BlockNumber blk, int count)
 						  HASH_ENTER, &found);
 	if (!found)
 	{
-//		elog(WARNING, "not found gmaprel");
+//		elog(WARNING, "memset 3");
 		MemSet(gmaprel->map, 0, sizeof(gmaprel->map));
 	}
 
@@ -999,9 +1132,9 @@ GMRelCountVacuum(RelFileNode node, BlockNumber blk, int count)
 	vacuum_counted++;
 
 	/* Once we replayed blocks for a range, dump/notify backend */
-	if (vacuum_counted >= MAP_RANGE_SIZE)
+	if (vacuum_counted >= MAP_N_RANGES)
 	{
-		GMRelWriteDumpFile(gmaprel, true);
+		//GMRelWriteDumpFile(gmaprel, true);
 		vacuum_counted = 0;
 	}
 
@@ -1047,9 +1180,12 @@ void GMRelSummary(void)
 		}
 
 		ereport(LOG,
-				(errmsg("\"%s\" [%s]",
+				(errmsg("\"%s\" %u %p [%s] MAP_SIZE %d : N_RANGES %d",
 						get_rel_name(RelidByRelfilenode(node.spcNode, node.relNode)),
-						dumped_map)));
+						node.relNode,
+						entry->map,
+						dumped_map,
+						MAP_LENGTH, MAP_N_RANGES)));
 	}
 	CommitTransactionCommand();
 }
@@ -1096,6 +1232,51 @@ GMRelWriteDumpFile(GarbageMapRel *gmaprel, bool start_tx)
 }
 
 static bool
+GMRelGetLatestDataFromDumpFile(RelFileNode node, GarbageMapRel **gmaprel)
+{
+	char filepath[MAXPGPATH];
+	struct stat statbuf;
+	pg_time_t	request_time;
+
+	GetGarbageMapFilePath(filepath, node);
+
+	request_time = time(NULL);
+
+	stat(filepath, &statbuf);
+	elog(NOTICE, "before... request time %ld, mtime %ld", request_time, statbuf.st_mtime);
+
+	/* Ask walker process to update dump file by signal */
+	kill(GMShared->walker_pid, SIGUSR1);
+
+	for (;;)
+	{
+		if (QueryCancelPending)
+		{
+			ereport(WARNING,
+					(errmsg("canceling wait for updating garbagemap file")));
+			QueryCancelPending = false;
+			break;
+		}
+
+		if (stat(filepath, &statbuf) == 0)
+		{
+			if (request_time <= statbuf.st_mtime)
+				break;
+		}
+
+		ConditionVariableSleep(&(GMShared->walker_cv), PG_WAIT_EXTENSION);
+	}
+
+	ConditionVariableCancelSleep();
+
+	/* Ok, dump file has been updated. Read it */
+	if (!GMRelReadDumpFile(node, gmaprel))
+		return false;
+
+	return true;
+}
+
+static bool
 GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel)
 {
 	char filepath[MAXPGPATH];
@@ -1114,8 +1295,7 @@ GMRelReadDumpFile(RelFileNode node, GarbageMapRel **gmaprel)
 
 	fread(*gmaprel, sizeof(GarbageMapRel), 1, fp);
 	FreeFile(fp);
-//	elog(WARNING, "Read \"%s\" : rel %d",
-//		 filepath, (*gmaprel)->node.relNode);
+//	elog(WARNING, "Read \"%s\" : rel %d", filepath, (*gmaprel)->node.relNode);
 	return true;
 }
 
@@ -1152,11 +1332,13 @@ garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
 //	if (!found)
 	if (true)	/* Always read from file!! */
 	{
-		if (!GMRelReadDumpFile(onerel->rd_node, &gmaprel))
+		if (!GMRelGetLatestDataFromDumpFile(onerel->rd_node, &gmaprel))
+//		if (!GMRelReadDumpFile(onerel->rd_node, &gmaprel))
 		{
 			hash_search(GarbageMapRelLocalHash,
 						(void *) &(onerel->rd_node),
 						HASH_REMOVE, NULL);
+			elog(WARNING, "could not find :(");
 			return workitem;
 		}
 	}
@@ -1167,27 +1349,28 @@ garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
 	 */
 
 	/* Dump for debugging */
-	elog(LOG, "backend : \"%s\" [%s]", RelationGetRelationName(onerel),
+	elog(INFO, "backend : \"%s\" [%s]", RelationGetRelationName(onerel),
 		 GarbagemapDump(gmaprel->map));
 
 	/* Choose one method */
 	//vacrange = gmap_highest_one(onerel, gmaprel);
-	vacrange = gmap_highest_n(onerel, gmaprel);
-	//vacrange = ;
+	//vacrange = gmap_highest_n(onerel, gmaprel);
+	vacrange = gmap_highest_n_percent(onerel, gmaprel);
 	//:
 
 	/* Set vacuum range for returning */
 	workitem->wi_vacrange = vacrange;
 
-	elog(LOG, "---- RESULT RANGE ----");
+	elog(INFO, "---- RESULT RANGE ----");
 	for (i = 0; workitem->wi_vacrange[i] != InvalidBlockNumber; i = i + 2)
 	{
 		BlockNumber start, end;
 		start = workitem->wi_vacrange[i];
 		end = workitem->wi_vacrange[i + 1];
-		elog(LOG, "range[%d] %d - %d (%d blks)", i, start, end, end - start + 1);
+		elog(INFO, "range[%d] %d - %d (%d blks)", start / MAP_N_RANGES,
+			 start, end, end - start + 1);
 	}
-	elog(LOG, "----------------------");
+	elog(INFO, "----------------------");
 
 	return workitem;
 }
@@ -1195,8 +1378,8 @@ garbagemap_workitem_hook(Relation onerel, VacuumWorkItem *workitem, int options)
 static inline void
 gmaprel_get_range(GarbageMapSlot slot, BlockNumber *start, BlockNumber *end)
 {
-	*start = MAP_RANGE_SIZE * slot;
-	*end = MAP_RANGE_SIZE * (slot + 1) -1;
+	*start = MAP_N_RANGES * slot;
+	*end = MAP_N_RANGES * (slot + 1) -1;
 }
 
 /*
@@ -1211,16 +1394,16 @@ gmap_highest_one(Relation onerel, GarbageMapRel *gmaprel)
 	int 		i;
 	BlockNumber	*result = palloc(sizeof(BlockNumber) * (2 + 1));
 
-	elog(LOG, "----- Select one range having most garbage -----");
+	elog(INFO, "----- Select one range having most garbage -----");
 
 	/* Find highest one range */
-	for (i = 0; i < MAP_RANGE_SIZE; i++)
+	for (i = 0; i < MAP_N_RANGES; i++)
 	{
 		if (max < gmaprel->map[i])
 		{
 			max_slot = i;
 			max = gmaprel->map[i];
-			elog(LOG, "map[%d] = %d", i, gmaprel->map[i]);
+			elog(INFO, "map[%d] = %d", i, gmaprel->map[i]);
 		}
 	}
 
@@ -1234,8 +1417,8 @@ gmap_highest_one(Relation onerel, GarbageMapRel *gmaprel)
 	result[0] = start;
 	result[1] = end;
 	result[2] = InvalidBlockNumber;
-	elog(LOG, "max slot %d val %d", max_slot, max);
-	elog(LOG, "-------------------------------------------------");
+	elog(INFO, "max slot %d val %d", max_slot, max);
+	elog(INFO, "-------------------------------------------------");
 
 	return result;
 }
@@ -1269,26 +1452,106 @@ vwi_compare(const void *a, const void *b)
 	else
 		return 1;
 }
+static int
+vwi_compare_index(const void *a, const void *b)
+{
+	ValueWithIndex *v1 = (ValueWithIndex *) a;
+	ValueWithIndex *v2 = (ValueWithIndex *) b;
+
+	if (v1->idx == v2->idx)
+		return 0;
+	if (v1->idx > v2->idx)
+		return 1;
+	else
+		return -1;
+}
+
+static BlockNumber *
+gmap_highest_n_percent(Relation onerel, GarbageMapRel *gmaprel)
+{
+	int i, cnt, n_choosen;
+	ValueWithIndex vwi[MAP_N_RANGES];
+	ValueWithIndex vwi_sorted[MAP_N_RANGES];
+	BlockNumber *result = palloc(sizeof(BlockNumber) * (MAP_N_RANGES * 2 + 1));
+	int total_value = 0;
+	int value_limit;
+
+	elog(INFO, "----- Select higher %d percent ranges -----", range_vacuum_percent);
+
+	/* Construct mapping {value, idx} */
+	for (i = 0; i < MAP_N_RANGES; i++)
+	{
+		vwi[i].value = gmaprel->map[i];
+		vwi[i].idx = i;
+		total_value += gmaprel->map[i];
+	}
+
+	/* Sort it by desc order of value and idx */
+	qsort(vwi, MAP_N_RANGES, sizeof(ValueWithIndex), vwi_compare);
+
+	value_limit = total_value * ((float)range_vacuum_percent / 100);
+
+	n_choosen = 0;
+	total_value = 0;
+	for (i = 0; i < MAP_N_RANGES; i++)
+	{
+		/* Don't count invalid value */
+		if (vwi[i].value <= 0)
+			break;
+
+		/* Reached limit? */
+		if (total_value >= value_limit)
+			break;
+
+		vwi_sorted[n_choosen++] = vwi[i];
+		total_value += vwi[i].value;
+	}
+
+	/* Sort by index in asc order */
+	qsort(vwi_sorted, n_choosen, sizeof(ValueWithIndex), vwi_compare_index);
+
+	cnt = 0;
+	for (i = 0; i < n_choosen; i ++)
+	{
+		BlockNumber start, end;
+
+		/* Get start/end block number in the range */
+		gmaprel_get_range(vwi_sorted[i].idx, &start, &end);
+		start = Max(start, 0);
+		end = Min(end, RelationGetNumberOfBlocks(onerel) - 1);
+
+		result[cnt++] = start;
+		result[cnt++] = end;
+		elog(INFO, "map[%d] = %d, start %u, end %u", vwi_sorted[i].idx, vwi_sorted[i].value,
+			 start, end);
+	}
+
+	elog(INFO, "---------- CHOOSE %d ranges-----------------", cnt / 2);
+
+	result[cnt] = InvalidBlockNumber;
+
+	return result;
+}
 
 static BlockNumber *
 gmap_highest_n(Relation onerel, GarbageMapRel *gmaprel)
 {
 #define N_CHOOSE 10 /* 10 ranges = 320MB */
 	int i, cnt;
-	ValueWithIndex vwi[MAP_RANGE_SIZE];
+	ValueWithIndex vwi[MAP_N_RANGES];
 	BlockNumber *result = palloc(sizeof(BlockNumber) * (N_CHOOSE * 2 + 1));
 
-	elog(LOG, "----- Select highest %d ranges -----", N_CHOOSE);
+	elog(INFO, "----- Select highest %d ranges -----", N_CHOOSE);
 
 	/* Construct mapping {value, idx} */
-	for (i = 0; i < MAP_RANGE_SIZE; i++)
+	for (i = 0; i < MAP_N_RANGES; i++)
 	{
 		vwi[i].value = gmaprel->map[i];
 		vwi[i].idx = i;
 	}
 
 	/* Sort it by desc order of value and idx */
-	qsort(vwi, MAP_RANGE_SIZE, sizeof(ValueWithIndex), vwi_compare);
+	qsort(vwi, MAP_N_RANGES, sizeof(ValueWithIndex), vwi_compare);
 
 	cnt = 0;
 	for (i = 0; i < N_CHOOSE; i++)
@@ -1304,10 +1567,10 @@ gmap_highest_n(Relation onerel, GarbageMapRel *gmaprel)
 
 		result[cnt++] = start;
 		result[cnt++] = end;
-		elog(LOG, "map[%d] = %d, start %u, end %u", i, vwi[i].value,
+		elog(INFO, "map[%d] = %d, start %u, end %u", vwi[i].idx, vwi[i].value,
 			 start, end);
 	}
-	elog(LOG, "-------------------------------------");
+	elog(INFO, "-------------------------------------");
 
 	result[cnt] = InvalidBlockNumber;
 

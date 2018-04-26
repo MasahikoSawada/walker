@@ -1,9 +1,9 @@
 set terminal png
-set output "/mnt/hgfs/Share/garbagemap/".table."-sortedhist.png"
+set output "/mnt/hgfs/Share/garbagemap/".time."_".table."-sortedhist.png"
 set ytics nomirror
 set y2tics
 set grid
-set xlabel "# of blocks"
+set xlabel "Range Number"
 set ylabel "# of dead tuples"
 set y2label "% of total dead tuples"
 set xrange[0:ymax]
