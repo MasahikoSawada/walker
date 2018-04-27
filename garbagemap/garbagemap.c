@@ -80,7 +80,7 @@ PG_FUNCTION_INFO_V1(pg_gmap_from_file);
 #define GMAP_DIRNAME "pg_gmap"
 
 #define GetGarbageMapFilePath(buf, node) \
-	snprintf(buf, MAXPGPATH, "./%s/%d.%d", GMAP_DIRNAME, node.spcNode, node.relNode)
+	snprintf(buf, MAXPGPATH, "./%s/%d.%d.%d", GMAP_DIRNAME, node.spcNode, node.dbNode, node.relNode)
 
 typedef int GarbageMapSlot;
 
@@ -203,6 +203,8 @@ static BlockNumber *gmap_highest_n_percent(Relation onerel, GarbageMapRel *gmapr
 /* Debug purpose */
 static void GMRelSummary(void);
 static char *GarbagemapDump(int *garbagemap);
+
+static void gm_shmem_on_exit_callback(int code, Datum arg);
 
 void
 _PG_init(void)
@@ -482,9 +484,14 @@ garbagemap_startup(void)
 		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
 			continue;
 
-		sscanf(de->d_name, "%d.%d", &n.spcNode, &n.relNode);
-		gmaprel = hash_search(GarbageMapRelHash, (void *) &(n.relNode),
+		sscanf(de->d_name, "%d.%d.%d", &n.spcNode, &n.dbNode, &n.relNode);
+		gmaprel = hash_search(GarbageMapRelHash, (void *) &(n),
 							  HASH_ENTER, NULL);
+
+		ereport(LOG, (errmsg("restored %u %u %u hash %u",
+							 n.relNode, n.dbNode, n.spcNode,
+							 get_hash_value(GarbageMapRelHash, (void *) &(n))
+						  )));
 
 		GMRelReadDumpFile(n, &gmaprel);
 	}
@@ -997,12 +1004,15 @@ GMRelGatherTrans(TransactionId xid, RelFileNode *ignore_rels, int nrels,
 		{
 			/* Get relation garbage map */
 			gmaprel = hash_search(GarbageMapRelHash,
-								  (void *) &cur->node,
+								  (void *) &(cur->node),
 								  HASH_ENTER, &found);
 
 			if (!found)
 			{
-//				elog(WARNING, "memset 1");
+				elog(WARNING, "created new one! %u %u %u hash %u",
+					 cur->node.relNode, cur->node.dbNode, cur->node.spcNode,
+					 get_hash_value(GarbageMapRelHash, (void *) &(cur->node)));
+				elog(WARNING, "memset 1");
 				MemSet(gmaprel->map, 0, sizeof(gmaprel->map));
 			}
 
@@ -1186,6 +1196,7 @@ void GMRelSummary(void)
 						entry->map,
 						dumped_map,
 						MAP_LENGTH, MAP_N_RANGES)));
+		GMRelWriteDumpFile(entry, false);
 	}
 	CommitTransactionCommand();
 }
@@ -1196,12 +1207,10 @@ GMRelDumpALl(void)
 	HASH_SEQ_STATUS status;
 	GarbageMapRel *entry;
 
-	StartTransactionCommand();
 	hash_seq_init(&status, GarbageMapRelHash);
 
 	while ((entry = (GarbageMapRel *) hash_seq_search(&status)) != NULL)
 		GMRelWriteDumpFile(entry, false);
-	CommitTransactionCommand();
 }
 
 static void
